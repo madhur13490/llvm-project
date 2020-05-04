@@ -282,6 +282,11 @@ def SDTAtomicLoad : SDTypeProfile<1, 1, [
   SDTCisInt<0>, SDTCisPtrTy<1>
 ]>;
 
+// TODO: Put restriction on 0th operand too.
+def SDTNewAtomicLoad : SDTypeProfile<1, 1, [
+  SDTCisPtrTy<1>
+]>;
+
 def SDTConvertOp : SDTypeProfile<1, 5, [ //cvtss, su, us, uu, ff, fs, fu, sf, su
   SDTCisVT<2, OtherVT>, SDTCisVT<3, OtherVT>, SDTCisPtrTy<4>, SDTCisPtrTy<5>
 ]>;
@@ -615,6 +620,9 @@ def atomic_load_fsub : SDNode<"ISD::ATOMIC_LOAD_FSUB" , SDTFPAtomic2,
 
 def atomic_load      : SDNode<"ISD::ATOMIC_LOAD", SDTAtomicLoad,
                     [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+def new_atomic_load  : SDNode<"ISD::ATOMIC_LOAD", SDTNewAtomicLoad,
+                    [SDNPHasChain, SDNPMayLoad, SDNPMemOperand]>;
+
 def atomic_store     : SDNode<"ISD::ATOMIC_STORE", SDTAtomicStore,
                     [SDNPHasChain, SDNPMayStore, SDNPMemOperand]>;
 
@@ -1565,6 +1573,21 @@ def atomic_load_32 :
   let IsAtomic = 1;
   let MemoryVT = i32;
 }
+
+def atomic_load_iptr :
+  PatFrag<(ops node:$ptr),
+          (new_atomic_load node:$ptr)> {
+  let IsAtomic = 1;
+  let MemoryVT = i32;
+}
+
+def atomic_load_vtany32 :
+  PatFrag<(ops node:$ptr),
+          (new_atomic_load node:$ptr)> {
+  let IsAtomic = 1;
+  let MemoryVT = vtAny32;
+}
+
 def atomic_load_64 :
   PatFrag<(ops node:$ptr),
           (atomic_load node:$ptr)> {

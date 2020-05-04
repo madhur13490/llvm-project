@@ -227,6 +227,9 @@ namespace llvm {
       // This value must be a multiple of 32.
       MAX_ALLOWED_VALUETYPE = 160,
 
+      // Match any 32-bit type. 
+      vtAny32        = 247,
+
       // A value of type llvm::TokenTy
       token          = 248,
 
@@ -304,6 +307,10 @@ namespace llvm {
     bool isScalarInteger() const {
       return (SimpleTy >= MVT::FIRST_INTEGER_VALUETYPE &&
               SimpleTy <= MVT::LAST_INTEGER_VALUETYPE);
+    }
+
+    bool isvtAny32() const {
+      return (SimpleTy == MVT::vtAny32);
     }
 
     /// Return true if this is a vector value type.
@@ -695,6 +702,7 @@ namespace llvm {
                          "in codegen and has no size");
       case Metadata:
         llvm_unreachable("Value type is metadata.");
+      case vtAny32: return TypeSize::Fixed(32);
       case i1:
       case v1i1: return TypeSize::Fixed(1);
       case nxv1i1: return TypeSize::Scalable(1);
