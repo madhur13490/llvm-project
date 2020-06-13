@@ -94,6 +94,7 @@ bool InstructionSelector::executeMatchTable(
     int64_t MatcherOpcode = MatchTable[CurrentIdx++];
     switch (MatcherOpcode) {
     case GIM_Try: {
+      dbgs() << "Name " << TgtInstructionSelector::getName();
       DEBUG_WITH_TYPE(TgtInstructionSelector::getName(),
                       dbgs() << CurrentIdx << ": Begin try-block\n");
       OnFailResumeAt.push_back(MatchTable[CurrentIdx++]);

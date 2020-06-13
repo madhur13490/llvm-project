@@ -165,6 +165,7 @@ def : GINodeEquiv<G_LOAD, atomic_load> {
 
 def : GINodeEquiv<G_ATOMIC_CMPXCHG, atomic_cmp_swap>;
 def : GINodeEquiv<G_ATOMICRMW_XCHG, atomic_swap>;
+def : GINodeEquiv<G_ATOMICRMW_XCHG, atomic_swap5>;
 def : GINodeEquiv<G_ATOMICRMW_ADD, atomic_load_add>;
 def : GINodeEquiv<G_ATOMICRMW_SUB, atomic_load_sub>;
 def : GINodeEquiv<G_ATOMICRMW_AND, atomic_load_and>;

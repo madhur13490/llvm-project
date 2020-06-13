@@ -271,6 +271,10 @@ def SDTAtomic2 : SDTypeProfile<1, 2, [
   SDTCisSameAs<0,2>, SDTCisInt<0>, SDTCisPtrTy<1>
 ]>;
 
+def SDTAtomic5 : SDTypeProfile<0, 2, [
+  SDTCisSameAs<0,1>, SDTCisInt<0>, SDTCisPtrTy<1>
+]>;
+
 def SDTFPAtomic2 : SDTypeProfile<1, 2, [
   SDTCisSameAs<0,2>, SDTCisFP<0>, SDTCisPtrTy<1>
 ]>;
@@ -587,6 +591,8 @@ def atomic_cmp_swap : SDNode<"ISD::ATOMIC_CMP_SWAP" , SDTAtomic3,
 def atomic_load_add : SDNode<"ISD::ATOMIC_LOAD_ADD" , SDTAtomic2,
                     [SDNPHasChain, SDNPMayStore, SDNPMayLoad, SDNPMemOperand]>;
 def atomic_swap     : SDNode<"ISD::ATOMIC_SWAP", SDTAtomic2,
+                    [SDNPHasChain, SDNPMayStore, SDNPMayLoad, SDNPMemOperand]>;
+def atomic_swap5     : SDNode<"ISD::ATOMIC_SWAP", SDTAtomic5,
                     [SDNPHasChain, SDNPMayStore, SDNPMayLoad, SDNPMemOperand]>;
 def atomic_load_sub : SDNode<"ISD::ATOMIC_LOAD_SUB" , SDTAtomic2,
                     [SDNPHasChain, SDNPMayStore, SDNPMayLoad, SDNPMemOperand]>;
@@ -1534,6 +1540,7 @@ multiclass ternary_atomic_op<SDNode atomic_op> {
 
 defm atomic_load_add  : binary_atomic_op<atomic_load_add>;
 defm atomic_swap      : binary_atomic_op<atomic_swap>;
+defm atomic_swap5      : binary_atomic_op<atomic_swap5>;
 defm atomic_load_sub  : binary_atomic_op<atomic_load_sub>;
 defm atomic_load_and  : binary_atomic_op<atomic_load_and>;
 defm atomic_load_clr  : binary_atomic_op<atomic_load_clr>;

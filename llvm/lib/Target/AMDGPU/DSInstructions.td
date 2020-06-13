@@ -470,6 +470,9 @@ defm DS_MIN_RTN_F32   : DS_1A1D_RET_mc<"ds_min_rtn_f32", VGPR_32, "ds_min_f32">;
 defm DS_MAX_RTN_F32   : DS_1A1D_RET_mc<"ds_max_rtn_f32", VGPR_32, "ds_max_f32">;
 
 defm DS_WRXCHG_RTN_B32 : DS_1A1D_RET_mc<"ds_wrxchg_rtn_b32">;
+
+defm DS_WRXCHG_B32     : DS_1A1D_NORET_mc<"ds_wrxchg_b32">;
+
 defm DS_WRXCHG2_RTN_B32 : DS_1A2D_Off8_RET_mc<"ds_wrxchg2_rtn_b32", VReg_64, VGPR_32>;
 defm DS_WRXCHG2ST64_RTN_B32 : DS_1A2D_Off8_RET_mc<"ds_wrxchg2st64_rtn_b32", VReg_64, VGPR_32>;
 
@@ -791,6 +794,25 @@ class DSAtomicRetPat<DS_Pseudo inst, ValueType vt, PatFrag frag, bit gds=0> : GC
   (inst $ptr, getVregSrcForVT<vt>.ret:$value, offset:$offset, (i1 gds))
 >;
 
+class DSAtomicNoRetPat<DS_Pseudo inst, ValueType vt, PatFrag frag, bit gds=0> : GCNPat <
+  (frag (DS1Addr1Offset i32:$ptr, i16:$offset), vt:$value),
+  (inst $ptr, getVregSrcForVT<vt>.ret:$value, offset:$offset, (i1 gds))
+>;
+
+multiclass DSAtomicNoRetPat_mc<DS_Pseudo inst, ValueType vt, string frag> {
+  let OtherPredicates = [LDSRequiresM0Init] in {
+    def : DSAtomicNoRetPat<inst, vt, !cast<PatFrag>(frag#"_local_m0_"#vt.Size)>;
+  }
+
+  //let OtherPredicates = [NotLDSRequiresM0Init] in {
+  //  def : DSAtomicNoRetPat<!cast<DS_Pseudo>(!cast<string>(inst)#"_gfx9"), vt,
+  //                       !cast<PatFrag>(frag#"_local_"#vt.Size)>;
+ // }
+
+//  def : DSAtomicNoRetPat<inst, vt, !cast<PatFrag>(frag#"_region_m0_"#vt.Size), 1>;
+}
+
+
 multiclass DSAtomicRetPat_mc<DS_Pseudo inst, ValueType vt, string frag> {
   let OtherPredicates = [LDSRequiresM0Init] in {
     def : DSAtomicRetPat<inst, vt, !cast<PatFrag>(frag#"_local_m0_"#vt.Size)>;
@@ -828,6 +850,7 @@ multiclass DSAtomicCmpXChg_mc<DS_Pseudo inst, ValueType vt, string frag> {
 
 // 32-bit atomics.
 defm : DSAtomicRetPat_mc<DS_WRXCHG_RTN_B32, i32, "atomic_swap">;
+defm : DSAtomicNoRetPat_mc<DS_WRXCHG_B32, i32, "atomic_swap5">;
 defm : DSAtomicRetPat_mc<DS_ADD_RTN_U32, i32, "atomic_load_add">;
 defm : DSAtomicRetPat_mc<DS_SUB_RTN_U32, i32, "atomic_load_sub">;
 defm : DSAtomicRetPat_mc<DS_INC_RTN_U32, i32, "atomic_inc">;
