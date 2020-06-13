@@ -137,6 +137,7 @@ def : GINodeEquiv<G_LOAD, AMDGPUatomic_ld_glue> {
 
 def : GINodeEquiv<G_ATOMIC_CMPXCHG, atomic_cmp_swap_glue>;
 def : GINodeEquiv<G_ATOMICRMW_XCHG, atomic_swap_glue>;
+def : GINodeEquiv<G_ATOMICRMW_XCHG, atomic_swap5_glue>;
 def : GINodeEquiv<G_ATOMICRMW_ADD, atomic_load_add_glue>;
 def : GINodeEquiv<G_ATOMICRMW_SUB, atomic_load_sub_glue>;
 def : GINodeEquiv<G_ATOMICRMW_AND, atomic_load_and_glue>;

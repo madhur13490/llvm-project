@@ -3543,6 +3543,7 @@ Expected<InstructionMatcher &> GlobalISelEmitter::createAndImportSelDAGMatcher(
     if (!SrcGIEquivOrNull)
       return failedImport("Pattern operator lacks an equivalent Instruction" +
                           explainOperator(Src->getOperator()));
+    else dbgs() << explainOperator(Src->getOperator());
     SrcGIOrNull = getEquivNode(*SrcGIEquivOrNull, Src);
 
     // The operators look good: match the opcode
