@@ -1021,6 +1021,12 @@ AArch64LegalizerInfo::AArch64LegalizerInfo(const AArch64Subtarget &ST)
       .clampNumElements(0, v2s32, v4s32)
       .clampNumElements(0, v2s64, v2s64)
       .moreElementsToNextPow2(0)
+      // Do SMax based lowering for < 128 bits.
+      .customIf(
+          [=](const LegalityQuery &Q) {
+            LLT SrcTy = Q.Types[0];
+            return SrcTy.isScalar() && SrcTy.getSizeInBits() < 128;
+          })
       .lower();
 
   // For fadd reductions we have pairwise operations available. We treat the
@@ -1262,6 +1268,8 @@ bool AArch64LegalizerInfo::legalizeCustom(
     return legalizeDynStackAlloc(MI, Helper);
   case TargetOpcode::G_PREFETCH:
     return legalizePrefetch(MI, Helper);
+  case TargetOpcode::G_ABS:
+    return Helper.lowerAbsToMaxNeg(MI);
   }
 
   llvm_unreachable("expected switch to return");
