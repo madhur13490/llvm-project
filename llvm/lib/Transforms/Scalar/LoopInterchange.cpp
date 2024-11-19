@@ -17,7 +17,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/StringSet.h"
 #include "llvm/Analysis/DependenceAnalysis.h"
 #include "llvm/Analysis/LoopCacheAnalysis.h"
 #include "llvm/Analysis/LoopInfo.h"
@@ -72,7 +71,7 @@ static const unsigned MaxMemInstrCount = 100;
 // Maximum loop depth supported.
 static const unsigned MaxLoopNestDepth = 10;
 
-#ifndef NDEBUG
+#ifdef DUMP_DEP_MATRICIES
 static void printDepMatrix(CharMatrix &DepMatrix) {
   for (auto &Row : DepMatrix) {
     for (auto D : Row)
@@ -111,7 +110,6 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
                     << " Loads and Stores to analyze\n");
 
   ValueVector::iterator I, IE, J, JE;
-  StringSet<> Seen;
 
   for (I = MemInstr.begin(), IE = MemInstr.end(); I != IE; ++I) {
     for (J = I, JE = MemInstr.end(); J != JE; ++J) {
@@ -158,10 +156,7 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
           Dep.push_back('I');
         }
 
-        // Make sure we only add unique entries to the dependency matrix.
-        if (Seen.insert(StringRef(Dep.data(), Dep.size())).second)
-          DepMatrix.push_back(Dep);
-
+        DepMatrix.push_back(Dep);
         if (DepMatrix.size() > MaxMemInstrCount) {
           LLVM_DEBUG(dbgs() << "Cannot handle more than " << MaxMemInstrCount
                             << " dependencies inside loop\n");
@@ -454,9 +449,10 @@ struct LoopInterchange {
       LLVM_DEBUG(dbgs() << "Populating dependency matrix failed\n");
       return false;
     }
-
-    LLVM_DEBUG(dbgs() << "Dependency matrix before interchange:\n";
-               printDepMatrix(DependencyMatrix));
+#ifdef DUMP_DEP_MATRICIES
+    LLVM_DEBUG(dbgs() << "Dependence before interchange\n");
+    printDepMatrix(DependencyMatrix);
+#endif
 
     // Get the Outermost loop exit.
     BasicBlock *LoopNestExit = OuterMostLoop->getExitBlock();
@@ -496,10 +492,10 @@ struct LoopInterchange {
         std::swap(LoopList[i - 1], LoopList[i]);
         // Update the DependencyMatrix
         interChangeDependencies(DependencyMatrix, i, i - 1);
-
-        LLVM_DEBUG(dbgs() << "Dependency matrix after interchange:\n";
-                   printDepMatrix(DependencyMatrix));
-
+#ifdef DUMP_DEP_MATRICIES
+        LLVM_DEBUG(dbgs() << "Dependence after interchange\n");
+        printDepMatrix(DependencyMatrix);
+#endif
         ChangedPerIter |= Interchanged;
         Changed |= Interchanged;
       }
