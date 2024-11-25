@@ -67,7 +67,7 @@ using CharMatrix = std::vector<std::vector<char>>;
 } // end anonymous namespace
 
 // Maximum number of dependencies that can be handled in the dependency matrix.
-static const unsigned MaxMemInstrCount = 100;
+static const unsigned MaxMemInstrCount = 16;
 
 // Maximum loop depth supported.
 static const unsigned MaxLoopNestDepth = 10;
@@ -109,6 +109,12 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
 
   LLVM_DEBUG(dbgs() << "Found " << MemInstr.size()
                     << " Loads and Stores to analyze\n");
+
+  if (MemInstr.size() > MaxMemInstrCount) {
+    LLVM_DEBUG(dbgs() << "Cannot handle more than " << MaxMemInstrCount
+                      << " dependencies inside loop\n");
+    return false;
+  }
 
   ValueVector::iterator I, IE, J, JE;
   StringSet<> Seen;
@@ -162,11 +168,6 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
         if (Seen.insert(StringRef(Dep.data(), Dep.size())).second)
           DepMatrix.push_back(Dep);
 
-        if (DepMatrix.size() > MaxMemInstrCount) {
-          LLVM_DEBUG(dbgs() << "Cannot handle more than " << MaxMemInstrCount
-                            << " dependencies inside loop\n");
-          return false;
-        }
       }
     }
   }
