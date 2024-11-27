@@ -66,7 +66,7 @@ using CharMatrix = std::vector<std::vector<char>>;
 } // end anonymous namespace
 
 // Maximum number of dependencies that can be handled in the dependency matrix.
-static const unsigned MaxMemInstrCount = 16;
+static const unsigned MaxMemInstrCount = 32;
 
 // Maximum loop depth supported.
 static const unsigned MaxLoopNestDepth = 10;
