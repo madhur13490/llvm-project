@@ -51,7 +51,8 @@ using namespace llvm;
 #define DEBUG_TYPE "loop-interchange"
 
 STATISTIC(LoopsInterchanged, "Number of loops interchanged");
-
+static unsigned int LoadStores;
+StringRef FuncName;
 static cl::opt<int> LoopInterchangeCostThreshold(
     "loop-interchange-threshold", cl::init(0), cl::Hidden,
     cl::desc("Interchange if you gain more than this number"));
@@ -66,7 +67,8 @@ using CharMatrix = std::vector<std::vector<char>>;
 } // end anonymous namespace
 
 // Maximum number of dependencies that can be handled in the dependency matrix.
-static const unsigned MaxMemInstrCount = 100;
+//static const unsigned MaxMemInstrCount = 100;
+static const unsigned MaxMemInstrCount = 256;
 
 // Maximum loop depth supported.
 static const unsigned MaxLoopNestDepth = 10;
@@ -108,6 +110,11 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
 
   LLVM_DEBUG(dbgs() << "Found " << MemInstr.size()
                     << " Loads and Stores to analyze\n");
+  LoadStores = MemInstr.size(); 
+  if (MemInstr.size() > MaxMemInstrCount) {
+    LLVM_DEBUG(dbgs() << "Cannot handle\n");
+    return false;
+  }
 
   ValueVector::iterator I, IE, J, JE;
 
@@ -157,11 +164,11 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
         }
 
         DepMatrix.push_back(Dep);
-        if (DepMatrix.size() > MaxMemInstrCount) {
-          LLVM_DEBUG(dbgs() << "Cannot handle more than " << MaxMemInstrCount
-                            << " dependencies inside loop\n");
-          return false;
-        }
+       // if (DepMatrix.size() > MaxMemInstrCount) {
+       //   LLVM_DEBUG(dbgs() << "Cannot handle more than " << MaxMemInstrCount
+       //                     << " dependencies inside loop\n");
+       //   return false;
+       // }
       }
     }
   }
@@ -535,7 +542,7 @@ struct LoopInterchange {
 
     LoopInterchangeTransform LIT(OuterLoop, InnerLoop, SE, LI, DT, LIL);
     LIT.transform();
-    LLVM_DEBUG(dbgs() << "Loops interchanged.\n");
+    LLVM_DEBUG(dbgs() << FuncName.str() << " LoadStores " << LoadStores <<  " Loops interchanged.\n");
     LoopsInterchanged++;
 
     llvm::formLCSSARecursively(*OuterLoop, *DT, LI, SE);
@@ -1720,6 +1727,7 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
                                            LoopStandardAnalysisResults &AR,
                                            LPMUpdater &U) {
   Function &F = *LN.getParent();
+  FuncName = F.getName();
   SmallVector<Loop *, 8> LoopList(LN.getLoops());
   // Ensure minimum depth of the loop nest to do the interchange.
   if (!hasMinimumLoopDepth(LoopList))
