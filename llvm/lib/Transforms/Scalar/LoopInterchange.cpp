@@ -68,10 +68,11 @@ using CharMatrix = std::vector<std::vector<char>>;
 
 // Maximum number of dependencies that can be handled in the dependency matrix.
 //static const unsigned MaxMemInstrCount = 100;
-static const unsigned MaxMemInstrCount = 256;
+static const unsigned MaxMemInstrCount = 64000;
 
 // Maximum loop depth supported.
 static const unsigned MaxLoopNestDepth = 10;
+static const unsigned MinLoopNestDepth = 2;
 
 #ifdef DUMP_DEP_MATRICIES
 static void printDepMatrix(CharMatrix &DepMatrix) {
@@ -111,21 +112,42 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
   LLVM_DEBUG(dbgs() << "Found " << MemInstr.size()
                     << " Loads and Stores to analyze\n");
   LoadStores = MemInstr.size(); 
-  if (MemInstr.size() > MaxMemInstrCount) {
-    LLVM_DEBUG(dbgs() << "Cannot handle\n");
-    return false;
-  }
-
+  // if (MemInstr.size() > MaxMemInstrCount) {
+  //   LLVM_DEBUG(dbgs() << "Cannot handle\n");
+  //   return false;
+  // }
+  
+  std::vector<std::pair<Instruction*, Instruction*>> InstPairs;
   ValueVector::iterator I, IE, J, JE;
-
+  
   for (I = MemInstr.begin(), IE = MemInstr.end(); I != IE; ++I) {
     for (J = I, JE = MemInstr.end(); J != JE; ++J) {
-      std::vector<char> Dep;
       Instruction *Src = cast<Instruction>(*I);
       Instruction *Dst = cast<Instruction>(*J);
       // Ignore Input dependencies.
       if (isa<LoadInst>(Src) && isa<LoadInst>(Dst))
         continue;
+      std::pair<Instruction*, Instruction*> Temp(Src, Dst);
+      InstPairs.push_back(Temp);
+    }
+  }
+  LLVM_DEBUG(dbgs() << "Number of pairs " << InstPairs.size() << "\n");
+  if (InstPairs.size() > MaxMemInstrCount) {
+     LLVM_DEBUG(dbgs() << "Cannot handle\n");
+     return false;
+ }
+
+  for (auto P : InstPairs) {
+    Instruction *Src = P.first;
+    Instruction *Dst = P.second;
+  //for (I = MemInstr.begin(), IE = MemInstr.end(); I != IE; ++I) {
+  //  for (J = I, JE = MemInstr.end(); J != JE; ++J) {
+      std::vector<char> Dep;
+      //Instruction *Src = cast<Instruction>(*I);
+      //Instruction *Dst = cast<Instruction>(*J);
+      // Ignore Input dependencies.
+      //if (isa<LoadInst>(Src) && isa<LoadInst>(Dst))
+        //continue;
       // Track Output, Flow, and Anti dependencies.
       if (auto D = DI->depends(Src, Dst, true)) {
         assert(D->isOrdered() && "Expected an output, flow or anti dep.");
@@ -170,7 +192,7 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
        //   return false;
        // }
       }
-    }
+    //}
   }
 
   return true;
@@ -241,9 +263,9 @@ static void populateWorklist(Loop &L, LoopVector &LoopList) {
   LoopList.push_back(CurrentLoop);
 }
 
-static bool hasMinimumLoopDepth(SmallVectorImpl<Loop *> &LoopList) {
+static bool hasSupportedLoopDepth(SmallVectorImpl<Loop *> &LoopList) {
   unsigned LoopNestDepth = LoopList.size();
-  if (LoopNestDepth < 2) {
+  if (LoopNestDepth < 2 || LoopNestDepth > MaxLoopNestDepth ) {
     LLVM_DEBUG(dbgs() << "Loop doesn't contain minimum nesting level.\n");
     return false;
   }
@@ -433,7 +455,7 @@ struct LoopInterchange {
     bool Changed = false;
 
     // Ensure minimum loop nest depth.
-    assert(hasMinimumLoopDepth(LoopList) && "Loop nest does not meet minimum depth.");
+    assert(hasSupportedLoopDepth(LoopList) && "Loop nest does not meet minimum depth.");
 
     unsigned LoopNestDepth = LoopList.size();
     if (LoopNestDepth > MaxLoopNestDepth) {
@@ -1729,8 +1751,10 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
   Function &F = *LN.getParent();
   FuncName = F.getName();
   SmallVector<Loop *, 8> LoopList(LN.getLoops());
+  unsigned LoopNestDepth = LoopList.size();
+  LLVM_DEBUG(dbgs() << "Loop nest depth " << LoopNestDepth << "\n");
   // Ensure minimum depth of the loop nest to do the interchange.
-  if (!hasMinimumLoopDepth(LoopList))
+  if (!hasSupportedLoopDepth(LoopList))
     return PreservedAnalyses::all();
 
   DependenceInfo DI(&F, &AR.AA, &AR.SE, &AR.LI);
