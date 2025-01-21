@@ -56,6 +56,14 @@ static cl::opt<int> LoopInterchangeCostThreshold(
     "loop-interchange-threshold", cl::init(0), cl::Hidden,
     cl::desc("Interchange if you gain more than this number"));
 
+// Maximum number of load-stores that can be handled in the dependency matrix.
+static cl::opt<unsigned int> MaxMemInstrCount(
+    "loop-interchange-max-meminstr-count", cl::init(64), cl::Hidden,
+    cl::desc(
+        "Maximum number of load-store instructions that should be handled "
+        "in the dependency matrix. Higher value may lead to more interchanges "
+        "at the cost of compile-time"));
+
 namespace {
 
 using LoopVector = SmallVector<Loop *, 8>;
@@ -65,8 +73,6 @@ using CharMatrix = std::vector<std::vector<char>>;
 
 } // end anonymous namespace
 
-// Maximum number of dependencies that can be handled in the dependency matrix.
-static const unsigned MaxMemInstrCount = 100;
 // Minimum loop depth supported.
 static cl::opt<unsigned int> MinLoopNestDepth(
     "loop-interchange-min-loop-nest-depth", cl::init(2), cl::Hidden,
@@ -89,7 +95,8 @@ static void printDepMatrix(CharMatrix &DepMatrix) {
 
 static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
                                      Loop *L, DependenceInfo *DI,
-                                     ScalarEvolution *SE) {
+                                     ScalarEvolution *SE,
+                                     OptimizationRemarkEmitter *ORE) {
   using ValueVector = SmallVector<Value *, 16>;
 
   ValueVector MemInstr;
@@ -114,7 +121,18 @@ static bool populateDependencyMatrix(CharMatrix &DepMatrix, unsigned Level,
 
   LLVM_DEBUG(dbgs() << "Found " << MemInstr.size()
                     << " Loads and Stores to analyze\n");
-
+  if (MemInstr.size() > MaxMemInstrCount) {
+    LLVM_DEBUG(dbgs() << "The transform doesn't support more than "
+                      << MaxMemInstrCount << " load/stores in a loop\n");
+    ORE->emit([&]() {
+      return OptimizationRemarkMissed(DEBUG_TYPE, "UnsupportedLoop",
+                                      L->getStartLoc(), L->getHeader())
+             << "Number of loads/stores exceeded, the supported maximum "
+                "can be increased with option "
+                "-loop-interchange-maxmeminstr-count.";
+    });
+    return false;
+  }
   ValueVector::iterator I, IE, J, JE;
 
   for (I = MemInstr.begin(), IE = MemInstr.end(); I != IE; ++I) {
@@ -459,7 +477,7 @@ struct LoopInterchange {
     CharMatrix DependencyMatrix;
     Loop *OuterMostLoop = *(LoopList.begin());
     if (!populateDependencyMatrix(DependencyMatrix, LoopNestDepth,
-                                  OuterMostLoop, DI, SE)) {
+                                  OuterMostLoop, DI, SE, ORE)) {
       LLVM_DEBUG(dbgs() << "Populating dependency matrix failed\n");
       return false;
     }
@@ -1745,7 +1763,6 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
   // Ensure minimum depth of the loop nest to do the interchange.
   if (!hasSupportedLoopDepth(LoopList, ORE))
     return PreservedAnalyses::all();
-
   DependenceInfo DI(&F, &AR.AA, &AR.SE, &AR.LI);
   std::unique_ptr<CacheCost> CC =
       CacheCost::getCacheCost(LN.getOutermostLoop(), AR, DI);
