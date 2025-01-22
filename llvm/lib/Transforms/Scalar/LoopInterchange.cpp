@@ -252,6 +252,26 @@ static bool hasMinimumLoopDepth(SmallVectorImpl<Loop *> &LoopList) {
   }
   return true;
 }
+
+static bool isComputableLoopNest(ScalarEvolution *SE, ArrayRef<Loop *> LoopList) {
+  for (Loop *L : LoopList) {
+    const SCEV *ExitCountOuter = SE->getBackedgeTakenCount(L);
+    if (isa<SCEVCouldNotCompute>(ExitCountOuter)) {
+      LLVM_DEBUG(dbgs() << "Couldn't compute backedge count\n");
+      return false;
+    }
+    if (L->getNumBackEdges() != 1) {
+      LLVM_DEBUG(dbgs() << "NumBackEdges is not equal to 1\n");
+      return false;
+    }
+    if (!L->getExitingBlock()) {
+      LLVM_DEBUG(dbgs() << "Loop doesn't have unique exit block\n");
+      return false;
+    }
+  }
+  return true;
+}
+
 namespace {
 
 /// LoopInterchangeLegality checks if it is legal to interchange the loop.
@@ -407,25 +427,6 @@ struct LoopInterchange {
     return processLoopList(LoopList);
   }
 
-  bool isComputableLoopNest(ArrayRef<Loop *> LoopList) {
-    for (Loop *L : LoopList) {
-      const SCEV *ExitCountOuter = SE->getBackedgeTakenCount(L);
-      if (isa<SCEVCouldNotCompute>(ExitCountOuter)) {
-        LLVM_DEBUG(dbgs() << "Couldn't compute backedge count\n");
-        return false;
-      }
-      if (L->getNumBackEdges() != 1) {
-        LLVM_DEBUG(dbgs() << "NumBackEdges is not equal to 1\n");
-        return false;
-      }
-      if (!L->getExitingBlock()) {
-        LLVM_DEBUG(dbgs() << "Loop doesn't have unique exit block\n");
-        return false;
-      }
-    }
-    return true;
-  }
-
   unsigned selectLoopForInterchange(ArrayRef<Loop *> LoopList) {
     // TODO: Add a better heuristic to select the loop to be interchanged based
     // on the dependence matrix. Currently we select the innermost loop.
@@ -442,10 +443,6 @@ struct LoopInterchange {
     if (LoopNestDepth > MaxLoopNestDepth) {
       LLVM_DEBUG(dbgs() << "Cannot handle loops of depth greater than "
                         << MaxLoopNestDepth << "\n");
-      return false;
-    }
-    if (!isComputableLoopNest(LoopList)) {
-      LLVM_DEBUG(dbgs() << "Not valid loop candidate for interchange\n");
       return false;
     }
 
@@ -1739,6 +1736,13 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
   // Ensure minimum depth of the loop nest to do the interchange.
   if (!hasMinimumLoopDepth(LoopList))
     return PreservedAnalyses::all();
+  
+  // Ensure computable loop nest.
+  if (!isComputableLoopNest(&AR.SE, LoopList)) {
+      LLVM_DEBUG(dbgs() << "Not valid loop candidate for interchange\n");
+      return PreservedAnalyses::all();
+  }
+
   DependenceInfo DI(&F, &AR.AA, &AR.SE, &AR.LI);
   std::unique_ptr<CacheCost> CC =
       CacheCost::getCacheCost(LN.getOutermostLoop(), AR, DI);
