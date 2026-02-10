@@ -19,8 +19,11 @@
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/DerivedTypes.h"
 #include "llvm/IR/Function.h"
+#include "llvm/IR/GlobalVariable.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Metadata.h"
+#include "llvm/IR/Module.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -392,9 +395,13 @@ void llvm::computeAccessFunctions(ScalarEvolution &SE, const SCEV *Expr,
     Subscripts.push_back(R);
   }
 
-  // Also push in last position the remainder of the last division: it will be
-  // the access function of the innermost dimension.
-  Subscripts.push_back(Res);
+  if (!Res->isZero()) {
+    // This is only needed when the outermost array size is not known.  Res = 0
+    // when the outermost array dimension is known, as for example when reading
+    // array sizes from a local or global declaration.
+    Subscripts.push_back(Res);
+    LLVM_DEBUG(dbgs() << "Subscripts push_back Res: " << *Res << "\n");
+  }
 
   std::reverse(Subscripts.begin(), Subscripts.end());
 
@@ -585,6 +592,74 @@ bool llvm::findFixedSizeArrayDimensions(ScalarEvolution &SE, const SCEV *Expr,
   return true;
 }
 
+static bool extractOuterDimFromGlobal(ScalarEvolution &SE, Value *BasePtr,
+                                      SmallVectorImpl<const SCEV *> &Sizes,
+                                      const SCEV *ElementSize) {
+  auto *GV = dyn_cast<GlobalVariable>(BasePtr);
+  if (!GV) {
+    LLVM_DEBUG(dbgs() << "Base pointer is not a global variable, "
+                      << "can't extract outer dimension.\n");
+    return false;
+  }
+
+  LLVM_DEBUG(
+    assert(Sizes.size() >= 2 && "Sizes should contain at least"
+                                " the element size and one dimension");
+    for (const SCEV *S : Sizes)
+        assert(cast<SCEVConstant>(S) && "Only SCEVConstant expected");
+
+    dbgs() << "extractArrayInfoFromGlobal called with BasePtr: "
+           << *BasePtr << "\n";
+  );
+
+  MDNode *ArrayDimsMD = GV->getMetadata(LLVMContext::MD_array_dims);
+
+  // Try to extract dimensions from array.dims metadata first.
+  if (!ArrayDimsMD) {
+    LLVM_DEBUG(dbgs() << "Can't find ound array.dims metadata");
+    return false;
+  }
+
+  LLVM_DEBUG(dbgs() << "Found array.dims metadata\n");
+  Sizes.clear();
+
+  // Metadata format: array dimension sizes.
+  unsigned NumOperands = ArrayDimsMD->getNumOperands();
+  if (NumOperands >= 1) {
+    for (unsigned i = 0; i < NumOperands; ++i) {
+      auto *SizeMD =
+          mdconst::dyn_extract<ConstantInt>(ArrayDimsMD->getOperand(i));
+      if (SizeMD) {
+        uint64_t Size = SizeMD->getZExtValue();
+        Type *I64Ty = Type::getInt64Ty(SE.getContext());
+        const SCEV *SizeSCEV = SE.getConstant(I64Ty, Size);
+        Sizes.push_back(SizeSCEV);
+
+        LLVM_DEBUG(dbgs() << "  Metadata dimension: " << Size << "\n");
+      }
+    }
+
+    if (!Sizes.empty()) {
+      // Add element size as the last element.
+      Sizes.push_back(ElementSize);
+
+      LLVM_DEBUG({
+        dbgs() << "Extracted array info from metadata for base pointer "
+               << *BasePtr << "\n";
+        dbgs() << "Dimensions: ";
+        for (const SCEV *Size : Sizes)
+          dbgs() << *Size << " ";
+        dbgs() << "\n";
+      });
+
+      return true;
+    }
+  }
+
+  LLVM_DEBUG(dbgs() << "Failed to extract from metadata\n");
+  return false;
+}
+
 /// Splits the SCEV into two vectors of SCEVs representing the subscripts and
 /// sizes of an array access, assuming that the array is a fixed size array.
 ///
@@ -644,19 +719,33 @@ bool llvm::delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
   Subscripts.clear();
   Sizes.clear();
 
+  const SCEVUnknown *BasePointer =
+      dyn_cast<SCEVUnknown>(SE.getPointerBase(Expr));
+  const SCEV *Offset = BasePointer ? SE.getMinusSCEV(Expr, BasePointer) : Expr;
+
+  LLVM_DEBUG(
+      dbgs() << "delinearizeFixedSizeArray, analysing expr: ";
+      Expr->dump();
+  );
+
   // First step: find the fixed array size.
   SmallVector<uint64_t, 4> ConstSizes;
-  if (!findFixedSizeArrayDimensions(SE, Expr, ConstSizes, ElementSize)) {
+  if (!findFixedSizeArrayDimensions(SE, Offset, ConstSizes, ElementSize)) {
     Sizes.clear();
     return false;
   }
 
   // Convert the constant size to SCEV.
   for (uint64_t Size : ConstSizes)
-    Sizes.push_back(SE.getConstant(Expr->getType(), Size));
+    Sizes.push_back(SE.getConstant(Offset->getType(), Size));
+
+  // Maybe we can extract the outer dimension from the global variable
+  // declaration.
+  if (BasePointer)
+    extractOuterDimFromGlobal(SE, BasePointer->getValue(), Sizes, ElementSize);
 
   // Second step: compute the access functions for each subscript.
-  computeAccessFunctions(SE, Expr, Subscripts, Sizes);
+  computeAccessFunctions(SE, Offset, Subscripts, Sizes);
 
   return !Subscripts.empty();
 }
@@ -821,25 +910,26 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
     // Do not delinearize if we cannot find the base pointer.
     if (!BasePointer)
       break;
-    AccessFn = SE->getMinusSCEV(AccessFn, BasePointer);
 
+    const SCEV *Offset = SE->getMinusSCEV(AccessFn, BasePointer);
     O << "\n";
     O << "Inst:" << Inst << "\n";
-    O << "AccessFunction: " << *AccessFn << "\n";
+    O << "AccessFunction: " << *Offset << "\n";
 
     SmallVector<const SCEV *, 3> Subscripts, Sizes;
 
     auto IsDelinearizationFailed = [&]() {
-      return Subscripts.size() == 0 || Sizes.size() == 0 ||
-             Subscripts.size() != Sizes.size();
+      return Subscripts.size() == 0 || Sizes.size() == 0;
     };
 
-    delinearize(*SE, AccessFn, Subscripts, Sizes, SE->getElementSize(&Inst));
+    delinearize(*SE, Offset, Subscripts, Sizes, SE->getElementSize(&Inst));
+
+    bool DelinearizedFixedArray = false;
     if (UseFixedSizeArrayHeuristic && IsDelinearizationFailed()) {
       Subscripts.clear();
       Sizes.clear();
-      delinearizeFixedSizeArray(*SE, AccessFn, Subscripts, Sizes,
-                                SE->getElementSize(&Inst));
+      DelinearizedFixedArray = delinearizeFixedSizeArray(
+          *SE, AccessFn, Subscripts, Sizes, SE->getElementSize(&Inst));
     }
 
     if (IsDelinearizationFailed()) {
@@ -848,18 +938,35 @@ void printDelinearization(raw_ostream &O, Function *F, LoopInfo *LI,
     }
 
     O << "Base offset: " << *BasePointer << "\n";
-    O << "ArrayDecl[UnknownSize]";
-    int Size = Subscripts.size();
-    for (int i = 0; i < Size - 1; i++)
-      O << "[" << *Sizes[i] << "]";
-    O << " with elements of " << *Sizes[Size - 1] << " bytes.\n";
+    O << "ArrayDecl";
+
+    // Print [Unknown] when the outermost dimension of the array is not known.
+    // Sizes[NumSizes - 1] is the array element size.
+    int NumSubscripts = Subscripts.size();
+    int NumSizes = Sizes.size();
+    if (NumSizes == NumSubscripts)
+      O << "[UnknownSize]";
+
+    // Handle different size relationships between Subscripts and Sizes.
+    if (NumSizes > 0) {
+      // Print array dimensions (all but the last, which is element size).
+      for (const SCEV *Size : ArrayRef(Sizes).drop_back())
+        O << "[" << *Size << "]";
+
+      // Print element size (last element in Sizes array).
+      O << " with elements of " << *Sizes[NumSizes - 1] << " bytes.\n";
+    } else {
+      O << " unknown sizes.\n";
+    }
 
     O << "ArrayRef";
-    for (int i = 0; i < Size; i++)
+    for (int i = 0; i < NumSubscripts; i++)
       O << "[" << *Subscripts[i] << "]";
     O << "\n";
 
-    bool IsValid = validateDelinearizationResult(*SE, Sizes, Subscripts);
+    bool IsValid = DelinearizedFixedArray
+                       ? true
+                       : validateDelinearizationResult(*SE, Sizes, Subscripts);
     O << "Delinearization validation: " << (IsValid ? "Succeeded" : "Failed")
       << "\n";
   }

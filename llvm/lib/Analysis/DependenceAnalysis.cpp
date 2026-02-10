@@ -2523,9 +2523,9 @@ bool DependenceInfo::tryDelinearizeFixedSize(
   const SCEV *ElemSize = SE->getElementSize(Src);
   assert(ElemSize == SE->getElementSize(Dst) && "Different element sizes");
   SmallVector<const SCEV *, 4> SrcSizes, DstSizes;
-  if (!delinearizeFixedSizeArray(*SE, SE->removePointerBase(SrcAccessFn),
+  if (!delinearizeFixedSizeArray(*SE, SrcAccessFn,
                                  SrcSubscripts, SrcSizes, ElemSize) ||
-      !delinearizeFixedSizeArray(*SE, SE->removePointerBase(DstAccessFn),
+      !delinearizeFixedSizeArray(*SE, DstAccessFn,
                                  DstSubscripts, DstSizes, ElemSize))
     return false;
 
