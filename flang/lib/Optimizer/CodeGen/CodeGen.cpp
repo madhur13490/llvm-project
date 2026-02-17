@@ -90,6 +90,9 @@ static llvm::cl::opt<bool> useNativeLogicalOps(
 // TODO: This should really be recovered from the specified target.
 static constexpr unsigned defaultAlign = 8;
 
+// Attribute name for array dimensions metadata.
+static constexpr llvm::StringLiteral arrayDimsAttrName = "llvm.array.dims";
+
 /// `fir.box` attribute values as defined for CFI_attribute_t in
 /// flang/ISO_Fortran_binding.h.
 static constexpr unsigned kAttrPointer = CFI_attribute_pointer;
@@ -102,6 +105,38 @@ static inline mlir::Type getLlvmPtrType(mlir::MLIRContext *context,
 
 static inline mlir::Type getI8Type(mlir::MLIRContext *context) {
   return mlir::IntegerType::get(context, 8);
+}
+
+/// Create array dimensions attribute for a fixed-size array type.
+/// Format: size per dimension.
+/// Returns empty ArrayAttr if not a fixed-size array.
+///
+/// NOTE: Fortran uses column-major layout, so dimensions are stored in
+/// reverse order in memory compared to source order. For example, Fortran
+/// REAL A(5,10) has shape [5,10] in source but memory layout [10 x [5 x ...]].
+/// We emit metadata in MEMORY LAYOUT ORDER to match delinearization
+/// expectations.
+static mlir::ArrayAttr createArrayDimsAttr(mlir::MLIRContext *context,
+                                           fir::SequenceType seqTy) {
+  // Only handle fixed-size arrays (no dynamic dimensions).
+  if (fir::hasDynamicSize(seqTy))
+    return mlir::ArrayAttr();
+
+  llvm::SmallVector<mlir::Attribute, 4> dims;
+  llvm::ArrayRef<int64_t> shape = seqTy.getShape();
+
+  // Emit in REVERSE order (memory layout order) for Fortran column-major
+  // layout.
+  for (int64_t size : llvm::reverse(shape)) {
+    mlir::IntegerAttr sizeAttr =
+        mlir::IntegerAttr::get(mlir::IntegerType::get(context, 64), size);
+    dims.push_back(sizeAttr);
+  }
+
+  if (dims.empty())
+    return mlir::ArrayAttr();
+
+  return mlir::ArrayAttr::get(context, dims);
 }
 
 /// Extract constant from a value that must be the result of one of the
@@ -3952,6 +3987,14 @@ struct GlobalOpConversion : public fir::FIROpConversion<fir::GlobalOp> {
     // them; whilst taking care not to apply attributes that are lowered in
     // other ways.
     g->setDiscardableAttrs(global->getDiscardableAttrDictionary());
+
+    // Attach array dimensions for fixed-size arrays.
+    mlir::Type globalTy = global.getType();
+    if (auto seqTy = mlir::dyn_cast<fir::SequenceType>(globalTy)) {
+      if (mlir::ArrayAttr arrayDims =
+              createArrayDimsAttr(global.getContext(), seqTy))
+        g->setDiscardableAttr(arrayDimsAttrName, arrayDims);
+    }
 
     auto &gr = g.getInitializerRegion();
     rewriter.inlineRegionBefore(global.getRegion(), gr, gr.end());
