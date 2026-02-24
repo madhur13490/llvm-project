@@ -36,6 +36,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
@@ -836,6 +837,9 @@ bool LoopInterchangeLegality::containsUnsafeInstructions(BasicBlock *BB,
   return any_of(*BB, [Skip](const Instruction &I) {
     if (&I == Skip)
       return false;
+    if (auto *II = dyn_cast<IntrinsicInst>(&I))
+      if (II->getIntrinsicID() == Intrinsic::assume)
+        return false;
     return I.mayHaveSideEffects() || I.mayReadFromMemory();
   });
 }
