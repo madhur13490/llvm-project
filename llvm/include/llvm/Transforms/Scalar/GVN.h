@@ -257,6 +257,23 @@ private:
   LoopInfo *LI = nullptr;
   MemorySSAUpdater *MSSAU = nullptr;
 
+  /// Cache of clobbering MemoryAccess results for the MSSA-backed value
+  /// numbering path. Keyed on the memory-accessing instruction; value is
+  /// the MemoryAccess returned by the skip-self walker's
+  /// getClobberingMemoryAccess(). Valid only within a single runImpl()
+  /// invocation. Populated on miss, consulted on subsequent queries for
+  /// the same instruction. Entries are dropped when the keyed instruction
+  /// or its cached clobber is removed (see removeInstruction), and the
+  /// whole cache is dropped around any PRE phase that may change the
+  /// MSSA def-use graph.
+  DenseMap<const Instruction *, MemoryAccess *> ClobberCache;
+
+  /// Reverse index: maps a MemoryAccess that appears as a cached clobber
+  /// to the set of instructions that cached it. Used to invalidate the
+  /// forward cache when the clobbering access itself is deleted.
+  DenseMap<MemoryAccess *, SmallVector<const Instruction *, 4>>
+      ClobberCacheReverse;
+
   ValueTable VN;
 
   /// A mapping from value numbers to lists of Value*'s that

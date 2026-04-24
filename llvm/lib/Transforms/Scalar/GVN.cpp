@@ -105,6 +105,13 @@ STATISTIC(MaxBBSpeculationCutoffReachedTimes,
           "Number of times we we reached gvn-max-block-speculations cut-off "
           "preventing further exploration");
 
+STATISTIC(NumClobberCacheHits,
+          "Number of GVN MSSA clobber queries served from cache");
+STATISTIC(NumClobberCacheMisses,
+          "Number of GVN MSSA clobber queries that missed the cache");
+STATISTIC(NumClobberCacheDrops,
+          "Number of times the GVN MSSA clobber cache was fully dropped");
+
 static cl::opt<bool> GVNEnablePRE("enable-pre", cl::init(true), cl::Hidden);
 static cl::opt<bool> GVNEnableLoadPRE("enable-load-pre", cl::init(true));
 static cl::opt<bool> GVNEnableLoadInLoopPRE("enable-load-in-loop-pre",
@@ -115,6 +122,14 @@ GVNEnableSplitBackedgeInLoadPRE("enable-split-backedge-in-load-pre",
 static cl::opt<bool> GVNEnableMemDep("enable-gvn-memdep", cl::init(true));
 static cl::opt<bool> GVNEnableMemorySSA("enable-gvn-memoryssa",
                                         cl::init(false));
+
+/// When true, GVN caches the result of its MSSA clobber queries within a
+/// single GVN invocation. Cache is scoped to one runImpl() call and dropped
+/// conservatively around any IR mutation that can affect the MSSA def-use
+/// graph (see removeInstruction and performPRE). Has effect only when the
+/// MSSA-backed GVN path is also enabled (-enable-gvn-memoryssa=1).
+static cl::opt<bool> GVNEnableClobberCache("gvn-clobber-cache",
+                                           cl::init(false), cl::Hidden);
 
 static cl::opt<uint32_t> MaxNumDeps(
     "gvn-max-num-deps", cl::Hidden, cl::init(100),
