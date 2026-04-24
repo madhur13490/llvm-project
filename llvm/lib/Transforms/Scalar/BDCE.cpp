@@ -18,6 +18,7 @@
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
+#include "llvm/Analysis/AssumptionCache.h"
 #include "llvm/Analysis/DemandedBits.h"
 #include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/IR/IRBuilder.h"
@@ -204,7 +205,16 @@ PreservedAnalyses BDCEPass::run(Function &F, FunctionAnalysisManager &AM) {
   if (!bitTrackingDCE(F, DB))
     return PreservedAnalyses::all();
 
+  // BDCE only rewrites operands and erases dead integer-typed /
+  // side-effect-free instructions. It never adds, deletes, splits, or
+  // re-terminates a basic block, and it never erases a call (in
+  // particular, never an llvm.assume: those are side-effecting and
+  // use-empty, so they are skipped by the worklist above). Therefore
+  // the CFG, the AssumptionCache, and the DemandedBits result it just
+  // consumed are all still valid for downstream passes.
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
+  PA.preserve<AssumptionAnalysis>();
+  PA.preserve<DemandedBitsAnalysis>();
   return PA;
 }
