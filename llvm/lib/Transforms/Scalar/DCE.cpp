@@ -43,8 +43,12 @@ RedundantDbgInstEliminationPass::run(Function &F, FunctionAnalysisManager &AM) {
     Changed |= RemoveRedundantDbgInstrs(&BB);
   if (!Changed)
     return PreservedAnalyses::all();
+  // Only debug-info instructions are removed here, so no non-debug
+  // analysis can become stale. See ADCE's matching comment around the
+  // ChangedNonDebugInstr path for the MemorySSA version of this reasoning.
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
+  PA.preserve<TargetLibraryAnalysis>();
   return PA;
 }
 
@@ -110,8 +114,15 @@ PreservedAnalyses DCEPass::run(Function &F, FunctionAnalysisManager &AM) {
   if (!eliminateDeadCode(F, &AM.getResult<TargetLibraryAnalysis>(F)))
     return PreservedAnalyses::all();
 
+  // DCE only erases instructions; it never adds, splits, or re-terminates
+  // basic blocks, so the CFG and everything derived from it is intact.
+  // TargetLibraryAnalysis is a module-level table that cannot become stale
+  // from a function-level mutation (its invalidate() always returns false),
+  // so claiming it as preserved lets downstream passes skip a
+  // recomputation that would do nothing useful.
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
+  PA.preserve<TargetLibraryAnalysis>();
   return PA;
 }
 
