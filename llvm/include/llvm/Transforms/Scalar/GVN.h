@@ -190,6 +190,10 @@ public:
     bool IsMSSAEnabled = false;
     DominatorTree *DT = nullptr;
 
+    /// Back-pointer to the enclosing GVNPass. When set, addMemoryStateToExp
+    /// consults the clobber cache on the pass to avoid redundant MSSA walks.
+    GVNPass *Parent = nullptr;
+
     uint32_t NextValueNumber = 1;
 
     Expression createExpr(Instruction *I);
@@ -238,6 +242,7 @@ public:
       MSSA = M;
       IsMSSAEnabled = MSSAEnabled;
     }
+    void setGVNPass(GVNPass *P) { Parent = P; }
     void setDomTree(DominatorTree *D) { DT = D; }
     uint32_t getNextUnusedValueNumber() { return NextValueNumber; }
     LLVM_ABI void verifyRemoved(const Value *) const;

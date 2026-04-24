@@ -494,7 +494,25 @@ void GVNPass::ValueTable::add(Value *V, uint32_t Num) {
 void GVNPass::ValueTable::addMemoryStateToExp(Instruction *I, Expression &Exp) {
   assert(MSSA && "addMemoryStateToExp should not be called without MemorySSA");
   assert(MSSA->getMemoryAccess(I) && "Instruction does not access memory");
-  MemoryAccess *MA = MSSA->getSkipSelfWalker()->getClobberingMemoryAccess(I);
+
+  MemoryAccess *MA = nullptr;
+  if (Parent && GVNEnableClobberCache) {
+    auto It = Parent->ClobberCache.find(I);
+    if (It != Parent->ClobberCache.end()) {
+      MA = It->second;
+      ++NumClobberCacheHits;
+    }
+  }
+
+  if (!MA) {
+    MA = MSSA->getSkipSelfWalker()->getClobberingMemoryAccess(I);
+    if (Parent && GVNEnableClobberCache) {
+      Parent->ClobberCache[I] = MA;
+      Parent->ClobberCacheReverse[MA].push_back(I);
+      ++NumClobberCacheMisses;
+    }
+  }
+
   Exp.VarArgs.push_back(lookupOrAdd(MA));
 }
 
@@ -2824,10 +2842,16 @@ bool GVNPass::runImpl(Function &F, AssumptionCache &RunAC, DominatorTree &RunDT,
   // lookupOrAddCall() and computeLoadStoreVN(), which depends on whether
   // IsMSSAEnabled is turned on.
   VN.setMemorySSA(MSSA, isMemorySSAEnabled());
+  VN.setGVNPass(this);
   ORE = RunORE;
   InvalidBlockRPONumbers = true;
   MemorySSAUpdater Updater(MSSA);
   MSSAU = MSSA ? &Updater : nullptr;
+
+  // The clobber cache is scoped to a single runImpl() call. Clear any
+  // stale state left over from a previous invocation of this pass object.
+  ClobberCache.clear();
+  ClobberCacheReverse.clear();
 
   bool Changed = false;
   bool ShouldContinue = true;
@@ -2854,6 +2878,16 @@ bool GVNPass::runImpl(Function &F, AssumptionCache &RunAC, DominatorTree &RunDT,
   }
 
   if (isPREEnabled()) {
+    // PRE inserts/moves instructions and splits critical edges, which can
+    // change the MSSA def-use graph in ways the clobber cache does not
+    // track precisely. Drop the cache here to keep v1 conservative; the
+    // main GVN fixpoint above has already reaped the bulk of the benefit.
+    if (GVNEnableClobberCache &&
+        !(ClobberCache.empty() && ClobberCacheReverse.empty())) {
+      ClobberCache.clear();
+      ClobberCacheReverse.clear();
+      ++NumClobberCacheDrops;
+    }
     // Fabricate val-num for dead-code in order to suppress assertion in
     // performPRE().
     assignValNumForDeadCode();
@@ -3202,8 +3236,25 @@ void GVNPass::cleanupGlobalSets() {
 void GVNPass::removeInstruction(Instruction *I) {
   VN.erase(I);
   if (MD) MD->removeInstruction(I);
-  if (MSSAU)
+  if (MSSAU) {
+    // If the clobber cache is active, evict any entries that reference
+    // I or I's MemoryAccess before MSSAU frees the access. The forward
+    // entry (if any) is keyed on I directly. The reverse index tells us
+    // which other instructions cached this access as *their* clobber;
+    // those forward entries must also go.
+    if (GVNEnableClobberCache) {
+      ClobberCache.erase(I);
+      if (MemoryAccess *MA = MSSAU->getMemorySSA()->getMemoryAccess(I)) {
+        auto RevIt = ClobberCacheReverse.find(MA);
+        if (RevIt != ClobberCacheReverse.end()) {
+          for (const Instruction *Dep : RevIt->second)
+            ClobberCache.erase(Dep);
+          ClobberCacheReverse.erase(RevIt);
+        }
+      }
+    }
     MSSAU->removeMemoryAccess(I);
+  }
 #ifndef NDEBUG
   verifyRemoved(I);
 #endif
