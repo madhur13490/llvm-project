@@ -68,7 +68,11 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cstdio>
+#include <cstdlib>
 #include "llvm/Transforms/Utils/AssumeBundleBuilder.h"
 #include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/Local.h"
@@ -105,12 +109,17 @@ STATISTIC(MaxBBSpeculationCutoffReachedTimes,
           "Number of times we we reached gvn-max-block-speculations cut-off "
           "preventing further exploration");
 
-STATISTIC(NumClobberCacheHits,
-          "Number of GVN MSSA clobber queries served from cache");
-STATISTIC(NumClobberCacheMisses,
-          "Number of GVN MSSA clobber queries that missed the cache");
-STATISTIC(NumClobberCacheDrops,
-          "Number of times the GVN MSSA clobber cache was fully dropped");
+// Forced on for instrumentation: we read these counters directly in runImpl()
+// to emit per-function records, which means they must be live in release
+// builds too (plain STATISTIC compiles to a no-op when NDEBUG is set).
+ALWAYS_ENABLED_STATISTIC(NumClobberCacheHits,
+                         "Number of GVN MSSA clobber queries served from cache");
+ALWAYS_ENABLED_STATISTIC(
+    NumClobberCacheMisses,
+    "Number of GVN MSSA clobber queries that missed the cache");
+ALWAYS_ENABLED_STATISTIC(
+    NumClobberCacheDrops,
+    "Number of times the GVN MSSA clobber cache was fully dropped");
 
 static cl::opt<bool> GVNEnablePRE("enable-pre", cl::init(true), cl::Hidden);
 static cl::opt<bool> GVNEnableLoadPRE("enable-load-pre", cl::init(true));
@@ -119,9 +128,9 @@ static cl::opt<bool> GVNEnableLoadInLoopPRE("enable-load-in-loop-pre",
 static cl::opt<bool>
 GVNEnableSplitBackedgeInLoadPRE("enable-split-backedge-in-load-pre",
                                 cl::init(false));
-static cl::opt<bool> GVNEnableMemDep("enable-gvn-memdep", cl::init(true));
+static cl::opt<bool> GVNEnableMemDep("enable-gvn-memdep", cl::init(fals));
 static cl::opt<bool> GVNEnableMemorySSA("enable-gvn-memoryssa",
-                                        cl::init(false));
+                                        cl::init(true));
 
 /// When true, GVN caches the result of its MSSA clobber queries within a
 /// single GVN invocation. Cache is scoped to one runImpl() call and dropped
@@ -129,7 +138,7 @@ static cl::opt<bool> GVNEnableMemorySSA("enable-gvn-memoryssa",
 /// graph (see removeInstruction and performPRE). Has effect only when the
 /// MSSA-backed GVN path is also enabled (-enable-gvn-memoryssa=1).
 static cl::opt<bool> GVNEnableClobberCache("gvn-clobber-cache",
-                                           cl::init(false), cl::Hidden);
+                                           cl::init(true), cl::Hidden);
 
 static cl::opt<uint32_t> MaxNumDeps(
     "gvn-max-num-deps", cl::Hidden, cl::init(100),
@@ -2824,10 +2833,48 @@ bool GVNPass::processInstruction(Instruction *I) {
 }
 
 /// runOnFunction - This is the main transformation entry point for a function.
+// One log file per process. Multiple cc1 invocations under runtest run in
+// parallel; serializing them through a single file would interleave records.
+// The file is opened the first time logCacheStats() is called and closed at
+// process exit. The path is "$GVN_CACHE_LOG_DIR/gvn-cache-<pid>.log", or
+// "/tmp/gvn-cache-<pid>.log" if GVN_CACHE_LOG_DIR is not set in the
+// environment. Format: one CSV-style line per Function:
+//   <function_name>,<hits>,<misses>
+static FILE *getCacheLogFile() {
+  static FILE *F = []() -> FILE * {
+    const char *Dir = std::getenv("GVN_CACHE_LOG_DIR");
+    if (!Dir || !*Dir)
+      Dir = "/tmp";
+    SmallString<128> Path(Dir);
+    sys::path::append(Path, "gvn-cache-" + std::to_string(sys::Process::getProcessId()) + ".log");
+    return std::fopen(Path.c_str(), "a");
+  }();
+  return F;
+}
+
+static void logCacheStats(const Function &F, uint64_t Hits, uint64_t Misses) {
+  if (Hits == 0 && Misses == 0)
+    return;
+  FILE *Log = getCacheLogFile();
+  if (!Log)
+    return;
+  // Single fprintf is atomic for short lines on POSIX (PIPE_BUF >= 4096),
+  // which is enough for our records.
+  std::fprintf(Log, "%s,%llu,%llu\n", F.getName().str().c_str(),
+               static_cast<unsigned long long>(Hits),
+               static_cast<unsigned long long>(Misses));
+  std::fflush(Log);
+}
+
 bool GVNPass::runImpl(Function &F, AssumptionCache &RunAC, DominatorTree &RunDT,
                       const TargetLibraryInfo &RunTLI, AAResults &RunAA,
                       MemoryDependenceResults *RunMD, LoopInfo &LI,
                       OptimizationRemarkEmitter *RunORE, MemorySSA *MSSA) {
+  // Snapshot the global cache counters before any work so we can compute
+  // per-function deltas at the end of this invocation.
+  const uint64_t HitsBefore = NumClobberCacheHits.getValue();
+  const uint64_t MissesBefore = NumClobberCacheMisses.getValue();
+
   AC = &RunAC;
   DT = &RunDT;
   VN.setDomTree(DT);
@@ -2910,6 +2957,11 @@ bool GVNPass::runImpl(Function &F, AssumptionCache &RunAC, DominatorTree &RunDT,
 
   if (MSSA && VerifyMemorySSA)
     MSSA->verifyMemorySSA();
+
+  // Emit the per-function cache record. Counters are global, so we subtract
+  // the pre-runImpl snapshot to get the delta attributable to this function.
+  logCacheStats(F, NumClobberCacheHits.getValue() - HitsBefore,
+                NumClobberCacheMisses.getValue() - MissesBefore);
 
   return Changed;
 }
