@@ -896,6 +896,47 @@ private:
   std::unique_ptr<SkipSelfWalker> SkipWalker;
   unsigned NextID = 0;
   bool IsOptimized = false;
+
+  // Optional skip-self walker cache (-memssa-clobber-cache). Caches the
+  // result of getClobberingMemoryAccess(MA) on the SkipSelfWalker, which
+  // is the only overload GVN exercises and the only overload not already
+  // cached by MemoryUseOrDef::getOptimized(). The Loc-taking overload and
+  // the regular CachingWalker bypass these maps.
+  //
+  // SkipSelfClobbers maps each cached query MemoryAccess to its computed
+  // clobber. ReverseSkipSelfClobbers is the reverse index: for each cached
+  // clobber, the set of query accesses that resolved to it. The reverse
+  // map lets dropSkipSelfCacheFor() invalidate entries whose cached
+  // clobber is the access being removed; without it, deleting a clobber
+  // would leave dangling MemoryAccess* values in the forward map.
+  //
+  // Invalidation contract:
+  //   * Entries are dropped automatically when an access is removed via
+  //     removeFromLookups() (which MemorySSAUpdater::removeMemoryAccess
+  //     funnels through). Both the query side and the clobber side of the
+  //     cache are scrubbed for that access.
+  //   * Entries survive moveTo()/insert paths because dominance and
+  //     reachability of existing accesses is preserved.
+  //   * Callers that rewire defining/optimized accesses without going
+  //     through removeFromLookups (e.g. setDefiningAccess on an access
+  //     that stays alive) must consider the cached skip-self answer
+  //     stale; today no in-tree caller does this on accesses observed
+  //     by the cache.
+  //   * If the underlying Instruction is deleted but the wrapping
+  //     MemoryAccess is not, the cache itself stays sound (we key on
+  //     MemoryAccess*), but downstream callers crash on the dangling
+  //     instruction regardless. This is a pre-existing pass bug, not a
+  //     cache concern.
+  DenseMap<MemoryAccess *, MemoryAccess *> SkipSelfClobbers;
+  DenseMap<MemoryAccess *, SmallPtrSet<MemoryAccess *, 4>>
+      ReverseSkipSelfClobbers;
+
+  /// Drop any SkipSelf cache entries that involve \p MA, either as a
+  /// query or as a cached clobber. Called from removeFromLookups before
+  /// the access is destroyed; mirrors MemDep::removeInstruction.
+  void dropSkipSelfCacheFor(MemoryAccess *MA);
+
+  friend class ClobberWalkerBase;
 };
 
 /// Enables verification of MemorySSA.

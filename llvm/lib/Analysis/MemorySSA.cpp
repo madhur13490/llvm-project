@@ -19,6 +19,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/iterator.h"
 #include "llvm/ADT/iterator_range.h"
@@ -76,6 +77,18 @@ static cl::opt<unsigned> MaxCheckLimit(
     "memssa-check-limit", cl::Hidden, cl::init(100),
     cl::desc("The maximum number of stores/phis MemorySSA"
              "will consider trying to walk past (default = 100)"));
+
+static cl::opt<bool> EnableMSSAClobberCache(
+    "memssa-clobber-cache", cl::Hidden, cl::init(true),
+    cl::desc("Cache skip-self getClobberingMemoryAccess(MA) results on "
+             "MemorySSA."));
+
+STATISTIC(NumMSSAClobberCacheHits,
+          "Number of skip-self clobber queries served from MSSA cache");
+STATISTIC(NumMSSAClobberCacheMisses,
+          "Number of skip-self clobber queries that missed and were inserted");
+STATISTIC(NumMSSAClobberCacheDrops,
+          "Number of MSSA skip-self cache entries dropped on access removal");
 
 // Always verify MemorySSA if expensive checking is enabled.
 #ifdef EXPENSIVE_CHECKS
@@ -1008,12 +1021,20 @@ public:
   // Third argument (bool), defines whether the clobber search should skip the
   // original queried access. If true, there will be a follow-up query searching
   // for a clobber access past "self". Note that the Optimized access is not
-  // updated if a new clobber is found by this SkipSelf search. If this
-  // additional query becomes heavily used we may decide to cache the result.
+  // updated if a new clobber is found by this SkipSelf search.
   // Walker instantiations will decide how to set the SkipSelf bool.
+  // The skip-self answer is cached on MemorySSA when -memssa-clobber-cache
+  // is enabled; see MemorySSA::SkipSelfClobbers.
   MemoryAccess *getClobberingMemoryAccessBase(MemoryAccess *, BatchAAResults &,
                                               unsigned &, bool,
                                               bool UseInvariantGroup = true);
+
+private:
+  // Inner worker for the no-Loc overload: this is the unchanged walker
+  // logic, factored out so the public entry point can wrap it with the
+  // skip-self cache lookup/insert.
+  MemoryAccess *computeClobber(MemoryAccess *, BatchAAResults &, unsigned &,
+                               bool SkipSelf, bool UseInvariantGroup);
 };
 
 /// A MemorySSAWalker that does AA walks to disambiguate accesses. It no
@@ -1845,11 +1866,45 @@ MemoryUseOrDef *MemorySSA::createNewAccess(Instruction *I,
   return MUD;
 }
 
+// See MemorySSA.h for the full SkipSelf cache invalidation contract. The
+// short version: this is the single chokepoint reached from
+// removeFromLookups(), which is in turn called from
+// MemorySSAUpdater::removeMemoryAccess(). We invalidate both directions
+// (query side and clobber side) here so neither map is left with a
+// dangling MemoryAccess pointer once \p MA is destroyed.
+void MemorySSA::dropSkipSelfCacheFor(MemoryAccess *MA) {
+  // MA was a query: drop its forward entry and remove it from the reverse
+  // bucket of its old clobber.
+  auto FwdIt = SkipSelfClobbers.find(MA);
+  if (FwdIt != SkipSelfClobbers.end()) {
+    MemoryAccess *OldClobber = FwdIt->second;
+    SkipSelfClobbers.erase(FwdIt);
+    auto RevIt = ReverseSkipSelfClobbers.find(OldClobber);
+    if (RevIt != ReverseSkipSelfClobbers.end()) {
+      RevIt->second.erase(MA);
+      if (RevIt->second.empty())
+        ReverseSkipSelfClobbers.erase(RevIt);
+    }
+    ++NumMSSAClobberCacheDrops;
+  }
+
+  // MA was a cached clobber: drop every forward entry pointing at it.
+  auto RevIt = ReverseSkipSelfClobbers.find(MA);
+  if (RevIt != ReverseSkipSelfClobbers.end()) {
+    for (MemoryAccess *Q : RevIt->second) {
+      SkipSelfClobbers.erase(Q);
+      ++NumMSSAClobberCacheDrops;
+    }
+    ReverseSkipSelfClobbers.erase(RevIt);
+  }
+}
+
 /// Properly remove \p MA from all of MemorySSA's lookup tables.
 void MemorySSA::removeFromLookups(MemoryAccess *MA) {
   assert(MA->use_empty() &&
          "Trying to remove memory access that still has uses");
   BlockNumbering.erase(MA);
+  dropSkipSelfCacheFor(MA);
   if (auto *MUD = dyn_cast<MemoryUseOrDef>(MA))
     MUD->setDefiningAccess(nullptr);
   // Invalidate our walker's cache if necessary
@@ -2535,6 +2590,34 @@ getInvariantGroupClobberingInstruction(Instruction &I, DominatorTree &DT) {
 }
 
 MemoryAccess *MemorySSA::ClobberWalkerBase::getClobberingMemoryAccessBase(
+    MemoryAccess *MA, BatchAAResults &BAA, unsigned &UpwardWalkLimit,
+    bool SkipSelf, bool UseInvariantGroup) {
+  // Skip-self clobber cache: only consulted on the no-Loc skip-self path
+  // with UseInvariantGroup left at its default. Mirrors how MD caches local
+  // queries (LocalDeps), with ReverseSkipSelfClobbers as the reverse index
+  // so removeFromLookups can drop entries whose clobber is destroyed.
+  const bool UseCache = EnableMSSAClobberCache && SkipSelf && UseInvariantGroup;
+  if (UseCache) {
+    auto It = MSSA->SkipSelfClobbers.find(MA);
+    if (It != MSSA->SkipSelfClobbers.end()) {
+      ++NumMSSAClobberCacheHits;
+      return It->second;
+    }
+  }
+
+  // Compute the clobber via the unchanged walker logic.
+  MemoryAccess *Result =
+      computeClobber(MA, BAA, UpwardWalkLimit, SkipSelf, UseInvariantGroup);
+
+  if (UseCache) {
+    MSSA->SkipSelfClobbers[MA] = Result;
+    MSSA->ReverseSkipSelfClobbers[Result].insert(MA);
+    ++NumMSSAClobberCacheMisses;
+  }
+  return Result;
+}
+
+MemoryAccess *MemorySSA::ClobberWalkerBase::computeClobber(
     MemoryAccess *MA, BatchAAResults &BAA, unsigned &UpwardWalkLimit,
     bool SkipSelf, bool UseInvariantGroup) {
   auto *StartingAccess = dyn_cast<MemoryUseOrDef>(MA);
