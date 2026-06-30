@@ -56,3 +56,15 @@ func.func @array_coor_shifted(%addr : !fir.ref<!fir.array<10xi32>>, %idx : index
 // CHECK: %[[UB_CHECK:.*]] = icmp sle i64 %{{.*}}, 14
 // CHECK: call void @llvm.assume(i1 %[[LB_CHECK]]){{.*}}!llvm.array.bounds
 // CHECK: call void @llvm.assume(i1 %[[UB_CHECK]]){{.*}}!llvm.array.bounds
+
+// Assumed-size arrays must not get bounds assumes.
+func.func @array_coor_assumed_size(%addr : !fir.ref<!fir.array<?xf32>>, %idx : index) -> f32 {
+  %extent = fir.assumed_size_extent : index
+  %shape = fir.shape %extent : (index) -> !fir.shape<1>
+  %ref = fir.array_coor %addr(%shape) %idx : (!fir.ref<!fir.array<?xf32>>, !fir.shape<1>, index) -> !fir.ref<f32>
+  %val = fir.load %ref : !fir.ref<f32>
+  return %val : f32
+}
+
+// CHECK-LABEL: define float @array_coor_assumed_size
+// CHECK-NOT: call void @llvm.assume

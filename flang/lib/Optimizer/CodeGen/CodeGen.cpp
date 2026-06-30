@@ -3245,6 +3245,19 @@ struct InsertOnRangeOpConversion
 } // namespace
 
 namespace {
+/// Return true when \p extent is a compile-time constant greater than zero.
+/// Assumed-size arrays use fir.assumed_size_extent / -1 and must not get
+/// bounds assumes.
+static bool hasKnownPositiveConstantExtent(mlir::Value extent) {
+  if (llvm::isa_and_nonnull<fir::AssumedSizeExtentOp>(extent.getDefiningOp()))
+    return false;
+  if (auto constOp = extent.getDefiningOp<mlir::LLVM::ConstantOp>()) {
+    if (auto intAttr = mlir::dyn_cast<mlir::IntegerAttr>(constOp.getValue()))
+      return intAttr.getValue().isStrictlyPositive();
+  }
+  return false;
+}
+
 /// XArrayCoor is the address arithmetic on a dynamically shaped, sliced,
 /// shifted etc. array.
 /// (See the static restriction on coordinate_of.) array_coor determines the
@@ -3311,21 +3324,25 @@ struct XArrayCoorOpConversion
       if (!baseIsBoxed && !coor.getShape().empty()) {
         mlir::Value extent =
             integerCast(loc, rewriter, idxTy, operands[shapeOffset]);
-        // Compute upper bound: ub = lb + extent - 1.
-        mlir::Value lbPlusExtent =
-            mlir::LLVM::AddOp::create(rewriter, loc, idxTy, lb, extent, nsw);
-        mlir::Value ub = mlir::LLVM::SubOp::create(rewriter, loc, idxTy,
-                                                   lbPlusExtent, one, nsw);
-        // Create bounds check conditions.
-        mlir::Value lbCheck = mlir::LLVM::ICmpOp::create(
-            rewriter, loc, mlir::LLVM::ICmpPredicate::sge, index, lb);
-        mlir::Value ubCheck = mlir::LLVM::ICmpOp::create(
-            rewriter, loc, mlir::LLVM::ICmpPredicate::sle, index, ub);
-        // Emit assumes for lower and upper bounds with array_bounds marker.
-        auto lbAssume = mlir::LLVM::AssumeOp::create(rewriter, loc, lbCheck);
-        lbAssume->setAttr("llvm.array_bounds", rewriter.getUnitAttr());
-        auto ubAssume = mlir::LLVM::AssumeOp::create(rewriter, loc, ubCheck);
-        ubAssume->setAttr("llvm.array_bounds", rewriter.getUnitAttr());
+        // Only emit assumes when the declared extent is a known positive
+        // constant. Assumed-size and other unbounded arrays use extent <= 0.
+        if (hasKnownPositiveConstantExtent(extent)) {
+          // Compute upper bound: ub = lb + extent - 1.
+          mlir::Value lbPlusExtent =
+              mlir::LLVM::AddOp::create(rewriter, loc, idxTy, lb, extent, nsw);
+          mlir::Value ub = mlir::LLVM::SubOp::create(rewriter, loc, idxTy,
+                                                     lbPlusExtent, one, nsw);
+          // Create bounds check conditions.
+          mlir::Value lbCheck = mlir::LLVM::ICmpOp::create(
+              rewriter, loc, mlir::LLVM::ICmpPredicate::sge, index, lb);
+          mlir::Value ubCheck = mlir::LLVM::ICmpOp::create(
+              rewriter, loc, mlir::LLVM::ICmpPredicate::sle, index, ub);
+          // Emit assumes for lower and upper bounds with array_bounds marker.
+          auto lbAssume = mlir::LLVM::AssumeOp::create(rewriter, loc, lbCheck);
+          lbAssume->setAttr("llvm.array_bounds", rewriter.getUnitAttr());
+          auto ubAssume = mlir::LLVM::AssumeOp::create(rewriter, loc, ubCheck);
+          ubAssume->setAttr("llvm.array_bounds", rewriter.getUnitAttr());
+        }
       }
 
       mlir::Value step = one;
