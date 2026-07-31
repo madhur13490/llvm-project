@@ -13,6 +13,7 @@
 #include "llvm/ADT/APInt.h"
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/Hashing.h"
 #include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/Sequence.h"
@@ -2672,10 +2673,67 @@ static bool sinkCommonCodeFromPredecessors(BasicBlock *BB,
 
 namespace {
 
+/// Coarse partition key for CompatibleSets. Only properties that
+/// shouldBelongToSameSet requires to be equal (necessary conditions).
+/// Invokes with different keys can never share a set; same key still
+/// needs the full compatibility check (PHI incoming values, attrs, ...).
+struct CompatibleInvokeKey {
+  Value *Callee = nullptr;
+  BasicBlock *NormalBB = nullptr;
+  Type *RetTy = nullptr;
+  unsigned NumOperands = 0;
+  bool IsIndirect = false;
+  bool HasNormalDest = false;
+
+  bool operator==(const CompatibleInvokeKey &O) const {
+    return Callee == O.Callee && NormalBB == O.NormalBB && RetTy == O.RetTy &&
+           NumOperands == O.NumOperands && IsIndirect == O.IsIndirect &&
+           HasNormalDest == O.HasNormalDest;
+  }
+};
+
+struct CompatibleInvokeKeyInfo {
+  static CompatibleInvokeKey getEmptyKey() {
+    CompatibleInvokeKey K;
+    K.Callee = reinterpret_cast<Value *>(~uintptr_t(0));
+    return K;
+  }
+  static CompatibleInvokeKey getTombstoneKey() {
+    CompatibleInvokeKey K;
+    K.Callee = reinterpret_cast<Value *>(~uintptr_t(1));
+    return K;
+  }
+  static unsigned getHashValue(const CompatibleInvokeKey &K) {
+    return hash_combine(K.Callee, K.NormalBB, K.RetTy, K.NumOperands,
+                        K.IsIndirect, K.HasNormalDest);
+  }
+  static bool isEqual(const CompatibleInvokeKey &LHS,
+                      const CompatibleInvokeKey &RHS) {
+    return LHS == RHS;
+  }
+};
+
+static CompatibleInvokeKey makeCompatibleInvokeKey(InvokeInst *II) {
+  CompatibleInvokeKey K;
+  K.IsIndirect = II->isIndirectCall();
+  K.Callee = K.IsIndirect ? nullptr : II->getCalledOperand();
+  K.HasNormalDest = !isa<UnreachableInst>(
+      II->getNormalDest()->getFirstNonPHIOrDbg());
+  K.NormalBB = K.HasNormalDest ? II->getNormalDest() : nullptr;
+  K.RetTy = II->getType();
+  K.NumOperands = II->getNumOperands();
+  return K;
+}
+
 struct CompatibleSets {
   using SetTy = SmallVector<InvokeInst *, 2>;
 
   SmallVector<SetTy, 1> Sets;
+
+  /// Set indices in creation order, keyed by CompatibleInvokeKey.
+  DenseMap<CompatibleInvokeKey, SmallVector<unsigned, 1>,
+           CompatibleInvokeKeyInfo>
+      KeyToSetIdx;
 
   static bool shouldBelongToSameSet(ArrayRef<InvokeInst *> Invokes);
 
@@ -2685,17 +2743,26 @@ struct CompatibleSets {
 };
 
 CompatibleSets::SetTy &CompatibleSets::getCompatibleSet(InvokeInst *II) {
-  // Perform a linear scan over all the existing sets, see if the new `invoke`
-  // is compatible with any particular set. Since we know that all the `invokes`
-  // within a set are compatible, only check the first `invoke` in each set.
-  // WARNING: at worst, this has quadratic complexity.
-  for (CompatibleSets::SetTy &Set : Sets) {
-    if (CompatibleSets::shouldBelongToSameSet({Set.front(), II}))
-      return Set;
+  // Invokes that can never merge always form their own set.
+  if (II->cannotMerge() || II->isInlineAsm())
+    return Sets.emplace_back();
+
+  // Only scan existing sets that share the coarse key. Compatible invokes
+  // always share a key; skipping other keys preserves set membership while
+  // avoiding an O(#sets) walk (was worst-case quadratic).
+  CompatibleInvokeKey Key = makeCompatibleInvokeKey(II);
+  if (auto It = KeyToSetIdx.find(Key); It != KeyToSetIdx.end()) {
+    for (unsigned Idx : It->second) {
+      if (CompatibleSets::shouldBelongToSameSet({Sets[Idx].front(), II}))
+        return Sets[Idx];
+    }
   }
 
   // Otherwise, we either had no sets yet, or this invoke forms a new set.
-  return Sets.emplace_back();
+  unsigned NewIdx = Sets.size();
+  Sets.emplace_back();
+  KeyToSetIdx[Key].push_back(NewIdx);
+  return Sets.back();
 }
 
 void CompatibleSets::insert(InvokeInst *II) {
