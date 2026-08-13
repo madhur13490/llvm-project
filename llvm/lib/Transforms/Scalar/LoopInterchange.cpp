@@ -198,7 +198,14 @@ static bool populateDependencyMatrix(const ScalarOptions &Opts,
                           << " Src:" << *Src << "\n Dst:" << *Dst << '\n');
         unsigned Levels = D->getLevels();
         char Direction;
-        for (unsigned II = 1; II <= Levels; ++II) {
+        // Dependence levels are numbered from the outermost loop enclosing both
+        // accesses, while a row of the matrix describes only the loops under
+        // consideration. Start reading at the depth of the outermost of those,
+        // so that a nest sitting inside other loops is described by its own
+        // levels rather than by the ones above it. Without this a row could be
+        // longer than the nest, which the padding below cannot then shorten.
+        unsigned Base = L->getLoopDepth();
+        for (unsigned II = Base; II <= Levels && II < Base + Level; ++II) {
           // `DVEntry::LE` is converted to `*`. This is because `LE` means `<`
           // or `=`, for which we don't have an equivalent representation, so
           // that the conservative approximation is necessary. The same goes for
@@ -221,18 +228,12 @@ static bool populateDependencyMatrix(const ScalarOptions &Opts,
         // dependency vector with '*'.
         if (D->isConfused()) {
           assert(Dep.empty() && "Expected empty dependency vector");
-          Dep.assign(L->getLoopDepth() + Level - 1, '*');
+          Dep.assign(Level, '*');
         }
 
-        while (Dep.size() < L->getLoopDepth() + Level - 1) {
+        while (Dep.size() < Level) {
           Dep.push_back('I');
         }
-
-        // Dependence analysis reports levels for the full enclosing loop nest.
-        // Keep only the suffix that corresponds to the selected perfect
-        // subnest.
-        if (Dep.size() > Level)
-          Dep.erase(Dep.begin(), Dep.end() - Level);
 
         // If all the elements of any direction vector have only '*', legality
         // can't be proven. Exit early to save compile time.
