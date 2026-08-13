@@ -100,6 +100,12 @@ static cl::opt<unsigned int> MaxLoopNestDepth(
     "loop-interchange-max-loop-nest-depth", cl::init(10), cl::Hidden,
     cl::desc("Maximum depth of loop nest considered for the transform"));
 
+// A nest whose loops do not form a single chain is skipped entirely by
+// default. Enabling this considers each maximal chain the nest contains.
+static cl::opt<bool> EnableChainWalk(
+    "loop-interchange-chain-walk", cl::init(false), cl::Hidden,
+    cl::desc("Consider every maximal loop chain within a branching nest"));
+
 // We prefer cache cost to vectorization by default.
 static cl::list<RuleTy> Profitabilities(
     "loop-interchange-profitabilities", cl::MiscFlags::CommaSeparated,
@@ -414,6 +420,15 @@ static void populateWorklist(Loop &L, LoopVector &LoopList) {
   LoopList.push_back(CurrentLoop);
 }
 
+/// Whether \p LoopList is one loop followed by its single-child descendants,
+/// which is the shape the transform works on directly.
+static bool isSingleChain(ArrayRef<Loop *> LoopList) {
+  for (unsigned I = 1; I < LoopList.size(); ++I)
+    if (LoopList[I]->getParentLoop() != LoopList[I - 1])
+      return false;
+  return true;
+}
+
 static bool hasSupportedLoopDepth(ArrayRef<Loop *> LoopList,
                                   OptimizationRemarkEmitter &ORE) {
   unsigned LoopNestDepth = LoopList.size();
@@ -683,10 +698,39 @@ struct LoopInterchange {
 
   bool run(LoopNest &LN) {
     SmallVector<Loop *, 8> LoopList(LN.getLoops());
-    for (unsigned I = 1; I < LoopList.size(); ++I)
-      if (LoopList[I]->getParentLoop() != LoopList[I - 1])
-        return false;
-    return processLoopList(LoopList);
+    if (isSingleChain(LoopList))
+      return processLoopList(LoopList);
+    if (!EnableChainWalk)
+      return false;
+
+    // The nest branches somewhere, so its loops are not one chain. Rather than
+    // discard all of it, take each maximal chain it contains in turn: a level
+    // with sibling loops below it would otherwise hide every nest underneath.
+    bool Changed = false;
+    SmallVector<Loop *, 8> Pending{&LN.getOutermostLoop()};
+    while (!Pending.empty()) {
+      SmallVector<Loop *, 8> Chain;
+      for (Loop *L = Pending.pop_back_val();;) {
+        Chain.push_back(L);
+        if (L->getSubLoops().size() != 1)
+          break;
+        L = L->getSubLoops().front();
+      }
+      LLVM_DEBUG(dbgs() << "Considering a chain of " << Chain.size()
+                        << " loops within a branching nest\n");
+      bool Transformed = false;
+      if (Chain.size() >= MinLoopNestDepth &&
+          Chain.size() <= MaxLoopNestDepth && isComputableLoopNest(SE, Chain))
+        Transformed = processLoopList(Chain);
+      Changed |= Transformed;
+
+      // Rewriting a chain replaces the loops it contains, so the ones recorded
+      // while walking it are no longer safe to visit. Descend only when the
+      // chain was left alone.
+      if (!Transformed)
+        append_range(Pending, Chain.back()->getSubLoops());
+    }
+    return Changed;
   }
 
   unsigned selectLoopForInterchange(ArrayRef<Loop *> LoopList) {
@@ -2693,13 +2737,20 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
 
   OptimizationRemarkEmitter ORE(&F);
 
-  // Ensure minimum depth of the loop nest to do the interchange.
-  if (!hasSupportedLoopDepth(LoopList, ORE))
-    return PreservedAnalyses::all();
-  // Ensure computable loop nest.
-  if (!isComputableLoopNest(&AR.SE, LoopList)) {
-    LLVM_DEBUG(dbgs() << "Not valid loop candidate for interchange\n");
-    return PreservedAnalyses::all();
+  // These describe the nest taken as a whole, so they decide anything only
+  // when the nest is the single chain handed straight to the transform. A walk
+  // of a branching nest applies them to each chain it considers instead: a
+  // nest that is too deep taken together can still contain a chain that is
+  // not.
+  if (!EnableChainWalk || isSingleChain(LoopList)) {
+    // Ensure minimum depth of the loop nest to do the interchange.
+    if (!hasSupportedLoopDepth(LoopList, ORE))
+      return PreservedAnalyses::all();
+    // Ensure computable loop nest.
+    if (!isComputableLoopNest(&AR.SE, LoopList)) {
+      LLVM_DEBUG(dbgs() << "Not valid loop candidate for interchange\n");
+      return PreservedAnalyses::all();
+    }
   }
 
   ORE.emit([&]() {
