@@ -21,6 +21,7 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -661,6 +662,24 @@ bool llvm::delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
   return !Subscripts.empty();
 }
 
+/// Does \p CtxI carry a frontend's word that the subscripts of the array
+/// access it performs each stay within their own dimension?
+///
+/// The subscripts.inrange metadata is accepted either on the access or on the
+/// address computation feeding it, since a frontend builds the address
+/// separately and only that step knows the subscripts. Losing it costs
+/// precision and nothing else, so no attempt is made to chase the address
+/// through arithmetic.
+static bool subscriptsAreInRange(const Instruction *CtxI) {
+  if (!CtxI)
+    return false;
+  if (CtxI->hasMetadata(LLVMContext::MD_subscripts_inrange))
+    return true;
+  const auto *Addr =
+      dyn_cast_or_null<Instruction>(getLoadStorePointerOperand(CtxI));
+  return Addr && Addr->hasMetadata(LLVMContext::MD_subscripts_inrange);
+}
+
 bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
                                          ArrayRef<const SCEV *> Sizes,
                                          ArrayRef<const SCEV *> Subscripts,
@@ -695,7 +714,15 @@ bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
   };
 
   // Range check: 0 <= I_k < S_k for k = 2..n.
-  for (size_t I = 1; I < Sizes.size(); ++I) {
+  //
+  // The check is needed because a language may let a subscript run past its
+  // own dimension and into the next, so staying inside each one has to be
+  // established rather than taken for granted. A language that forbids it can
+  // say so at the access instead, which is what subscripts.inrange records, and
+  // then there is nothing left to establish. The overflow reasoning below rests
+  // on these same bounds, so it still runs either way.
+  bool MustCheckRange = !subscriptsAreInRange(CtxI);
+  for (size_t I = 1; MustCheckRange && I < Sizes.size(); ++I) {
     const SCEV *Size = Sizes[I - 1];
     const SCEV *Subscript = Subscripts[I];
     if (!SE.isKnownNonNegative(Subscript) &&
