@@ -2551,8 +2551,8 @@ bool DependenceInfo::tryDelinearizeFixedSize(
   // iff the subscripts are positive and are less than the range of the
   // dimension.
   if (!DisableDelinearizationChecks) {
-    if (!validateDelinearizationResult(*SE, SrcSizes, SrcSubscripts) ||
-        !validateDelinearizationResult(*SE, DstSizes, DstSubscripts)) {
+    if (!validateDelinearizationResult(*SE, SrcSizes, SrcSubscripts, Src) ||
+        !validateDelinearizationResult(*SE, DstSizes, DstSubscripts, Dst)) {
       SrcSubscripts.clear();
       DstSubscripts.clear();
       return false;
@@ -2615,8 +2615,8 @@ bool DependenceInfo::tryDelinearizeParametricSize(
   // FIXME: It may be better to record these sizes and add them as constraints
   // to the dependency checks.
   if (!DisableDelinearizationChecks)
-    if (!validateDelinearizationResult(*SE, Sizes, SrcSubscripts) ||
-        !validateDelinearizationResult(*SE, Sizes, DstSubscripts))
+    if (!validateDelinearizationResult(*SE, Sizes, SrcSubscripts, Src) ||
+        !validateDelinearizationResult(*SE, Sizes, DstSubscripts, Dst))
       return false;
 
   return true;

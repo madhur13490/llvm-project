@@ -145,9 +145,14 @@ delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
 /// Check that each subscript in \p Subscripts is within the corresponding size
 /// in \p Sizes. For the outermost dimension, the subscript being negative is
 /// allowed.
-LLVM_ABI bool validateDelinearizationResult(ScalarEvolution &SE,
-                                            ArrayRef<const SCEV *> Sizes,
-                                            ArrayRef<const SCEV *> Subscripts);
+///
+/// When \p CtxI is given, a bound that does not hold everywhere may still be
+/// established from what is known at that program point, such as an assumption
+/// a frontend attached to the access.
+LLVM_ABI bool
+validateDelinearizationResult(ScalarEvolution &SE, ArrayRef<const SCEV *> Sizes,
+                              ArrayRef<const SCEV *> Subscripts,
+                              const Instruction *CtxI = nullptr);
 
 /// Gathers the individual index expressions from a GEP instruction.
 ///

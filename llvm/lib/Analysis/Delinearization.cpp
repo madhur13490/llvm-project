@@ -663,7 +663,8 @@ bool llvm::delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
 
 bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
                                          ArrayRef<const SCEV *> Sizes,
-                                         ArrayRef<const SCEV *> Subscripts) {
+                                         ArrayRef<const SCEV *> Subscripts,
+                                         const Instruction *CtxI) {
   // Sizes and Subscripts are as follows:
   //
   //   Sizes:      [UNK][S_2]...[S_n]
@@ -683,11 +684,22 @@ bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
     return SE.getMulExpr(A, B);
   };
 
+  // A bound that does not hold unconditionally may still be established from
+  // what is known where the access sits, which is where a frontend attaches
+  // what it knows about an array's extents.
+  auto Holds = [&](ICmpInst::Predicate Pred, const SCEV *LHS,
+                   const SCEV *RHS) {
+    if (SE.isKnownPredicate(Pred, LHS, RHS))
+      return true;
+    return CtxI && SE.isKnownPredicateAt(Pred, LHS, RHS, CtxI);
+  };
+
   // Range check: 0 <= I_k < S_k for k = 2..n.
   for (size_t I = 1; I < Sizes.size(); ++I) {
     const SCEV *Size = Sizes[I - 1];
     const SCEV *Subscript = Subscripts[I];
-    if (!SE.isKnownNonNegative(Subscript))
+    if (!SE.isKnownNonNegative(Subscript) &&
+        !Holds(ICmpInst::ICMP_SGE, Subscript, SE.getZero(Subscript->getType())))
       return false;
 
     // TODO: It may be better that delinearization itself unifies the types of
@@ -695,7 +707,7 @@ bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
     Type *WiderTy = SE.getWiderType(Subscript->getType(), Size->getType());
     Subscript = SE.getNoopOrSignExtend(Subscript, WiderTy);
     Size = SE.getNoopOrSignExtend(Size, WiderTy);
-    if (!SE.isKnownPredicate(ICmpInst::ICMP_SLT, Subscript, Size)) {
+    if (!Holds(ICmpInst::ICMP_SLT, Subscript, Size)) {
       LLVM_DEBUG(dbgs() << "Range check failed: " << *Subscript << " <s "
                         << *Size << "\n");
       return false;
