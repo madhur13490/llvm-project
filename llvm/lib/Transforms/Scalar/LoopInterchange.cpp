@@ -816,6 +816,11 @@ bool LoopInterchangeLegality::containsUnsafeInstructions(BasicBlock *BB,
   return any_of(*BB, [Skip](const Instruction &I) {
     if (&I == Skip)
       return false;
+    // An assumption carries no value into the loop body and constrains only
+    // the point it sits at, so finding one between the two headers does not
+    // make the nest any less tight.
+    if (isa<AssumeInst>(&I))
+      return false;
     return I.mayHaveSideEffects() || I.mayReadFromMemory();
   });
 }
@@ -1610,6 +1615,14 @@ bool LoopInterchangeLegality::canInterchangeLoops(unsigned InnerLoopId,
     for (Instruction &I : *BB) {
       // Loads and stores are checked separately, so we can skip them here.
       if (isa<LoadInst, StoreInst, PseudoProbeInst>(&I))
+        continue;
+
+      // An assumption states a fact about the values at its own program point,
+      // and interchange runs the same set of iterations, so each fact still
+      // holds where it lands. Frontends attach these to array subscripts, so
+      // refusing them would reject the very nests that subscript information
+      // is there to enable.
+      if (isa<AssumeInst>(&I))
         continue;
 
       // We cannot ignore potential memory reads, e.g., loads inside the called
