@@ -239,6 +239,16 @@ SmallVector<IntT> convertArrayToIndices(ArrayAttr attrs) {
   return convertArrayToIndices<IntT>(attrs.getValue());
 }
 
+/// Name of the discardable attribute stating that the array access an operation
+/// performs uses subscripts that each stay within the extent of the dimension
+/// they select, as some source languages require. It is translated to the
+/// `subscripts.inrange` metadata on the corresponding LLVM IR instruction,
+/// which dependence analysis uses to recover the shape of an array from a
+/// flattened address.
+inline StringRef getSubscriptsInRangeAttrName() {
+  return "llvm.subscripts_inrange";
+}
+
 } // namespace LLVM
 } // namespace mlir
 

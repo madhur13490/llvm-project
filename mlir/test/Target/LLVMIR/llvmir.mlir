@@ -1110,6 +1110,17 @@ llvm.func @gep(%ptr: !llvm.ptr, %idx: i64,
   llvm.return
 }
 
+// The `llvm.subscripts_inrange` unit attribute is translated to the
+// `subscripts.inrange` metadata, an empty node, on the LLVM IR instruction.
+// CHECK-LABEL: @access_subscripts_inrange
+llvm.func @access_subscripts_inrange(%ptr: !llvm.ptr, %val: f32) {
+  // CHECK: = load float, ptr %{{.*}}!subscripts.inrange !{{[0-9]+}}
+  %0 = llvm.load %ptr {llvm.subscripts_inrange} : !llvm.ptr -> f32
+  // CHECK: store float %{{.*}}, ptr %{{.*}}!subscripts.inrange !{{[0-9]+}}
+  llvm.store %val, %ptr {llvm.subscripts_inrange} : f32, !llvm.ptr
+  llvm.return
+}
+
 //
 // Indirect function calls
 //

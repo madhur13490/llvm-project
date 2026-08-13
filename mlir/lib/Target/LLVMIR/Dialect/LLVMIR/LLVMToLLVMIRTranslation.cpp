@@ -886,6 +886,18 @@ amendOperationImpl(Operation &op, ArrayRef<llvm::Instruction *> instructions,
   // Handle the array bounds attribute on llvm.assume: it marks assumes as
   // array bounds checks that should be dropped before vectorization. Translate
   // it to the "llvm.array.bounds" metadata on the LLVM IR intrinsic call.
+  // Handle the in-range attribute on a memory access: it states that the
+  // subscripts of the array access it performs stay within the dimensions they
+  // select. Translate it to the "subscripts.inrange" metadata on the LLVM IR
+  // instruction.
+  if (name == LLVM::getSubscriptsInRangeAttrName()) {
+    llvm::LLVMContext &ctx = moduleTranslation.getLLVMContext();
+    llvm::MDNode *md = llvm::MDNode::get(ctx, {});
+    for (llvm::Instruction *inst : instructions)
+      inst->setMetadata(llvm::LLVMContext::MD_subscripts_inrange, md);
+    return success();
+  }
+
   if (name == LLVM::AssumeOp::getArrayBoundsAttrName()) {
     llvm::LLVMContext &ctx = moduleTranslation.getLLVMContext();
     llvm::MDNode *md = llvm::MDNode::get(ctx, {});
