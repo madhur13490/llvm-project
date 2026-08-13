@@ -3868,6 +3868,50 @@ struct PrefetchOpConversion : public fir::FIROpConversion<fir::PrefetchOp> {
 };
 
 /// `fir.load` --> `llvm.load`
+/// Does the array access reached through \p addr have subscripts that the
+/// language guarantees stay within the dimension each of them selects?
+///
+/// Fortran 2018 section 9.5.3.3.2 requires this of a conforming program, so it
+/// holds wherever the access names an array whose shape is given at the
+/// reference. A boxed base carries its shape at run time, and an assumed-size
+/// dimension has no extent for a subscript to stay within, so neither can be
+/// spoken for. The answer covers every dimension at once, which is why one
+/// dimension without an extent rules out the whole access.
+static bool arraySubscriptsAreInRange(mlir::Value addr) {
+  // A reference reaches the access through conversions that only restate its
+  // type, most often from a whole array to one of its elements. Follow those,
+  // but only while the element type stays the same: a conversion that reads the
+  // storage as a different element type describes a shape other than the one
+  // the subscripts were formed against.
+  while (auto convert = addr.getDefiningOp<fir::ConvertOp>()) {
+    mlir::Value from = convert.getValue();
+    if (fir::unwrapSequenceType(fir::unwrapRefType(from.getType())) !=
+        fir::unwrapSequenceType(fir::unwrapRefType(convert.getType())))
+      return false;
+    addr = from;
+  }
+
+  auto coor = addr.getDefiningOp<fir::cg::XArrayCoorOp>();
+  if (!coor || coor.getShape().empty())
+    return false;
+  if (mlir::isa<fir::BaseBoxType>(coor.getMemref().getType()))
+    return false;
+  return !llvm::isa_and_nonnull<fir::AssumedSizeExtentOp>(
+      coor.getShape().back().getDefiningOp());
+}
+
+/// Record on a memory access that its subscripts stay within their dimensions.
+///
+/// The fact belongs on the access rather than on the address computation that
+/// feeds it: the address is rearranged freely by later passes, which do not
+/// carry metadata across the instructions they build, whereas an access keeps
+/// what is attached to it.
+static void markSubscriptsInRange(mlir::Operation *op,
+                                  mlir::ConversionPatternRewriter &rewriter) {
+  op->setAttr(mlir::LLVM::getSubscriptsInRangeAttrName(),
+              rewriter.getUnitAttr());
+}
+
 struct LoadOpConversion : public fir::FIROpConversion<fir::LoadOp> {
   using FIROpConversion::FIROpConversion;
 
@@ -3938,6 +3982,9 @@ struct LoadOpConversion : public fir::FIROpConversion<fir::LoadOp> {
       if (std::optional<mlir::ArrayAttr> optionalAccessGroups =
               load.getAccessGroups())
         loadOp.setAccessGroups(*optionalAccessGroups);
+      if (options.emitArrayBoundsMetadata &&
+          arraySubscriptsAreInRange(load.getMemref()))
+        markSubscriptsInRange(loadOp, rewriter);
       rewriter.replaceOp(load, loadOp.getResult());
     }
     return mlir::success();
@@ -4083,6 +4130,9 @@ struct StoreOpConversion : public fir::FIROpConversion<fir::StoreOp> {
       newOp.setTBAATags(*optionalTag);
     else
       attachTBAATag(newOp, storeTy, storeTy, nullptr);
+    if (options.emitArrayBoundsMetadata &&
+        arraySubscriptsAreInRange(store.getMemref()))
+      markSubscriptsInRange(newOp, rewriter);
     rewriter.eraseOp(store);
     return mlir::success();
   }

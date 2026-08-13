@@ -117,6 +117,11 @@ getFIRToLLVMPassOptions(const MLIRToLLVMPassPipelineConfig &config) {
   // levels.
   options.emitArrayBoundsAssumes =
       enableArrayBoundsAssumes && config.OptLevel >= llvm::OptimizationLevel::O2;
+  // The metadata states the same bounds fact as the assumes above, so it is
+  // likewise reserved for the levels where loop optimizations run.
+  options.emitArrayBoundsMetadata = enableArrayBoundsMetadata &&
+                                    config.OptLevel >=
+                                        llvm::OptimizationLevel::O2;
   return options;
 }
 

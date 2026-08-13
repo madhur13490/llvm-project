@@ -71,6 +71,13 @@ struct FIRToLLVMPassOptions {
   // optimizations but also increase IR size, so they are only emitted at
   // higher optimization levels (see getFIRToLLVMPassOptions).
   bool emitArrayBoundsAssumes = false;
+
+  // Attach the subscripts.inrange metadata to a non-boxed array access, stating
+  // that its subscripts stay within the dimensions they select, which the
+  // standard requires of a conforming program. This states the same fact as the
+  // assumes above at no cost in instructions, but only reaches the passes that
+  // look for it.
+  bool emitArrayBoundsMetadata = false;
 };
 
 /// Convert FIR to the LLVM IR dialect with default options.

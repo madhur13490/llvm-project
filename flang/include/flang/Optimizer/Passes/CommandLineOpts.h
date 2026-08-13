@@ -50,6 +50,12 @@ extern llvm::cl::opt<bool> skipExternalRttiDefinition;
 /// enabled, these assumes are only emitted at higher optimization levels.
 extern llvm::cl::opt<bool> enableArrayBoundsAssumes;
 
+/// Shared option in tools to control marking a non-boxed array access with the
+/// subscripts.inrange metadata, which states that its subscripts stay within
+/// the dimensions they select. Even when enabled, the metadata is only attached
+/// at higher optimization levels.
+extern llvm::cl::opt<bool> enableArrayBoundsMetadata;
+
 /// Default optimization level used to create Flang pass pipeline is O0.
 extern llvm::OptimizationLevel defaultOptLevel;
 
