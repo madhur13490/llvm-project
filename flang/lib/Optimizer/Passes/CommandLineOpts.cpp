@@ -53,8 +53,9 @@ cl::opt<bool> enableArrayBoundsAssumes(
 
 cl::opt<bool> enableArrayBoundsMetadata(
     "enable-array-bounds-metadata",
-    cl::desc("mark non-boxed array accesses as having subscripts that stay "
-             "within their dimensions (only at -O2 and above)"),
+    cl::desc("record on non-boxed array accesses that their subscripts stay "
+             "within their dimensions, naming the extents of those dimensions "
+             "where they are known at compile time (only at -O2 and above)"),
     cl::init(false), cl::Hidden);
 
 OptimizationLevel defaultOptLevel{OptimizationLevel::O0};

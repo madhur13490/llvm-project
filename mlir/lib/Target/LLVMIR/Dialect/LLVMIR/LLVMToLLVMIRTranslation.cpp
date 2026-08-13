@@ -883,21 +883,32 @@ amendOperationImpl(Operation &op, ArrayRef<llvm::Instruction *> instructions,
     return success();
   }
 
-  // Handle the array bounds attribute on llvm.assume: it marks assumes as
-  // array bounds checks that should be dropped before vectorization. Translate
-  // it to the "llvm.array.bounds" metadata on the LLVM IR intrinsic call.
   // Handle the in-range attribute on a memory access: it states that the
   // subscripts of the array access it performs stay within the dimensions they
-  // select. Translate it to the "subscripts.inrange" metadata on the LLVM IR
-  // instruction.
+  // select, and lists the extents of those dimensions from the fastest-varying
+  // to the slowest. Translate it to the "subscripts.inrange" metadata on the
+  // LLVM IR instruction, whose operands are those extents.
   if (name == LLVM::getSubscriptsInRangeAttrName()) {
+    auto extents = dyn_cast<DenseI64ArrayAttr>(attribute.getValue());
+    if (!extents)
+      return op.emitOpError("expected ")
+             << LLVM::getSubscriptsInRangeAttrName()
+             << " to be a dense i64 array of extents";
     llvm::LLVMContext &ctx = moduleTranslation.getLLVMContext();
-    llvm::MDNode *md = llvm::MDNode::get(ctx, {});
+    llvm::Type *i64Ty = llvm::Type::getInt64Ty(ctx);
+    SmallVector<llvm::Metadata *> mdExtents;
+    for (int64_t extent : extents.asArrayRef())
+      mdExtents.push_back(llvm::ConstantAsMetadata::get(
+          llvm::ConstantInt::get(i64Ty, extent)));
+    llvm::MDNode *md = llvm::MDNode::get(ctx, mdExtents);
     for (llvm::Instruction *inst : instructions)
       inst->setMetadata(llvm::LLVMContext::MD_subscripts_inrange, md);
     return success();
   }
 
+  // Handle the array bounds attribute on llvm.assume: it marks assumes as
+  // array bounds checks that should be dropped before vectorization. Translate
+  // it to the "llvm.array.bounds" metadata on the LLVM IR intrinsic call.
   if (name == LLVM::AssumeOp::getArrayBoundsAttrName()) {
     llvm::LLVMContext &ctx = moduleTranslation.getLLVMContext();
     llvm::MDNode *md = llvm::MDNode::get(ctx, {});

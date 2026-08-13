@@ -21,6 +21,7 @@
 #include "flang/Optimizer/Dialect/FIRCG/CGOps.h"
 #include "flang/Optimizer/Dialect/FIRDialect.h"
 #include "flang/Optimizer/Dialect/FIROps.h"
+#include "flang/Optimizer/Dialect/FIROpsSupport.h"
 #include "flang/Optimizer/Dialect/FIRType.h"
 #include "flang/Optimizer/Support/DataLayout.h"
 #include "flang/Optimizer/Support/InternalNames.h"
@@ -3867,9 +3868,9 @@ struct PrefetchOpConversion : public fir::FIROpConversion<fir::PrefetchOp> {
   }
 };
 
-/// `fir.load` --> `llvm.load`
-/// Does the array access reached through \p addr have subscripts that the
-/// language guarantees stay within the dimension each of them selects?
+/// The address computation of the array access reached through \p addr, if the
+/// language guarantees that its subscripts stay within the dimension each of
+/// them selects, or null if that cannot be spoken for.
 ///
 /// Fortran 2018 section 9.5.3.3.2 requires this of a conforming program, so it
 /// holds wherever the access names an array whose shape is given at the
@@ -3877,7 +3878,7 @@ struct PrefetchOpConversion : public fir::FIROpConversion<fir::PrefetchOp> {
 /// dimension has no extent for a subscript to stay within, so neither can be
 /// spoken for. The answer covers every dimension at once, which is why one
 /// dimension without an extent rules out the whole access.
-static bool arraySubscriptsAreInRange(mlir::Value addr) {
+static fir::cg::XArrayCoorOp arrayAccessInRange(mlir::Value addr) {
   // A reference reaches the access through conversions that only restate its
   // type, most often from a whole array to one of its elements. Follow those,
   // but only while the element type stays the same: a conversion that reads the
@@ -3887,31 +3888,52 @@ static bool arraySubscriptsAreInRange(mlir::Value addr) {
     mlir::Value from = convert.getValue();
     if (fir::unwrapSequenceType(fir::unwrapRefType(from.getType())) !=
         fir::unwrapSequenceType(fir::unwrapRefType(convert.getType())))
-      return false;
+      return {};
     addr = from;
   }
 
   auto coor = addr.getDefiningOp<fir::cg::XArrayCoorOp>();
   if (!coor || coor.getShape().empty())
-    return false;
+    return {};
   if (mlir::isa<fir::BaseBoxType>(coor.getMemref().getType()))
-    return false;
-  return !llvm::isa_and_nonnull<fir::AssumedSizeExtentOp>(
-      coor.getShape().back().getDefiningOp());
+    return {};
+  if (llvm::isa_and_nonnull<fir::AssumedSizeExtentOp>(
+          coor.getShape().back().getDefiningOp()))
+    return {};
+  return coor;
 }
 
-/// Record on a memory access that its subscripts stay within their dimensions.
+/// Record on a memory access that its subscripts stay within their dimensions,
+/// naming those dimensions by their extents where they are known at compile
+/// time. A Fortran declaration names its dimensions from the fastest-varying to
+/// the slowest, which is the order the metadata asks for, so the shape is
+/// passed on as it stands. Extents left unstated do not weaken the guarantee,
+/// which is what a reader of the access needs; they only leave a consumer
+/// without the shape to check it against.
 ///
 /// The fact belongs on the access rather than on the address computation that
 /// feeds it: the address is rearranged freely by later passes, which do not
 /// carry metadata across the instructions they build, whereas an access keeps
 /// what is attached to it.
 static void markSubscriptsInRange(mlir::Operation *op,
+                                  fir::cg::XArrayCoorOp coor,
                                   mlir::ConversionPatternRewriter &rewriter) {
+  llvm::SmallVector<int64_t> extents;
+  for (mlir::Value extent : coor.getShape()) {
+    std::optional<llvm::APInt> constant = fir::getIntIfConstant(extent);
+    std::optional<int64_t> value =
+        constant ? constant->trySExtValue() : std::nullopt;
+    if (!value || *value < 0) {
+      extents.clear();
+      break;
+    }
+    extents.push_back(*value);
+  }
   op->setAttr(mlir::LLVM::getSubscriptsInRangeAttrName(),
-              rewriter.getUnitAttr());
+              rewriter.getDenseI64ArrayAttr(extents));
 }
 
+/// `fir.load` --> `llvm.load`
 struct LoadOpConversion : public fir::FIROpConversion<fir::LoadOp> {
   using FIROpConversion::FIROpConversion;
 
@@ -3982,9 +4004,9 @@ struct LoadOpConversion : public fir::FIROpConversion<fir::LoadOp> {
       if (std::optional<mlir::ArrayAttr> optionalAccessGroups =
               load.getAccessGroups())
         loadOp.setAccessGroups(*optionalAccessGroups);
-      if (options.emitArrayBoundsMetadata &&
-          arraySubscriptsAreInRange(load.getMemref()))
-        markSubscriptsInRange(loadOp, rewriter);
+      if (options.emitArrayBoundsMetadata)
+        if (fir::cg::XArrayCoorOp coor = arrayAccessInRange(load.getMemref()))
+          markSubscriptsInRange(loadOp, coor, rewriter);
       rewriter.replaceOp(load, loadOp.getResult());
     }
     return mlir::success();
@@ -4130,9 +4152,9 @@ struct StoreOpConversion : public fir::FIROpConversion<fir::StoreOp> {
       newOp.setTBAATags(*optionalTag);
     else
       attachTBAATag(newOp, storeTy, storeTy, nullptr);
-    if (options.emitArrayBoundsMetadata &&
-        arraySubscriptsAreInRange(store.getMemref()))
-      markSubscriptsInRange(newOp, rewriter);
+    if (options.emitArrayBoundsMetadata)
+      if (fir::cg::XArrayCoorOp coor = arrayAccessInRange(store.getMemref()))
+        markSubscriptsInRange(newOp, coor, rewriter);
     rewriter.eraseOp(store);
     return mlir::success();
   }

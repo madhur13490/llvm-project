@@ -15,10 +15,11 @@ func.func @load_2d(%addr : !fir.ref<!fir.array<10x20xi32>>, %i : index, %j : ind
   return %val : i32
 }
 
-// The metadata carries no operands, so it costs no instructions.
+// The metadata names the extents the subscripts stay within, in the order a
+// Fortran declaration gives them, and costs no instructions.
 // CHECK-LABEL: define i32 @load_2d
 // CHECK-NOT: call void @llvm.assume
-// CHECK: load i32{{.*}}!subscripts.inrange
+// CHECK: load i32{{.*}}!subscripts.inrange ![[MD:[0-9]+]]
 
 func.func @store_2d(%addr : !fir.ref<!fir.array<10x20xi32>>, %i : index, %j : index, %v : i32) {
   %c10 = arith.constant 10 : index
@@ -30,7 +31,19 @@ func.func @store_2d(%addr : !fir.ref<!fir.array<10x20xi32>>, %i : index, %j : in
 }
 
 // CHECK-LABEL: define void @store_2d
-// CHECK: store i32{{.*}}!subscripts.inrange
+// CHECK: store i32{{.*}}!subscripts.inrange ![[MD]]
+
+// Extents that are not known until run time have no place in the metadata, so
+// the guarantee is stated without them.
+func.func @load_dynamic(%addr : !fir.ref<!fir.array<?x?xi32>>, %n : index, %i : index, %j : index) -> i32 {
+  %shape = fir.shape %n, %n : (index, index) -> !fir.shape<2>
+  %ref = fir.array_coor %addr(%shape) %i, %j : (!fir.ref<!fir.array<?x?xi32>>, !fir.shape<2>, index, index) -> !fir.ref<i32>
+  %val = fir.load %ref : !fir.ref<i32>
+  return %val : i32
+}
+
+// CHECK-LABEL: define i32 @load_dynamic
+// CHECK: load i32{{.*}}!subscripts.inrange ![[EMPTY:[0-9]+]]
 
 // An assumed-size dimension has no extent for a subscript to stay within, and
 // the metadata speaks for every dimension at once, so it is not attached here.
@@ -44,3 +57,6 @@ func.func @load_assumed_size(%addr : !fir.ref<!fir.array<?xi32>>, %idx : index) 
 
 // CHECK-LABEL: define i32 @load_assumed_size
 // CHECK-NOT: subscripts.inrange
+
+// CHECK-DAG: ![[MD]] = !{i64 10, i64 20}
+// CHECK-DAG: ![[EMPTY]] = !{}

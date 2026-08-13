@@ -662,22 +662,57 @@ bool llvm::delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
   return !Subscripts.empty();
 }
 
-/// Does \p CtxI carry a frontend's word that the subscripts of the array
-/// access it performs each stay within their own dimension?
+/// The subscripts.inrange metadata of \p CtxI, if it carries a frontend's word
+/// that the subscripts of the array access it performs each stay within their
+/// own dimension.
 ///
-/// The subscripts.inrange metadata is accepted either on the access or on the
-/// address computation feeding it, since a frontend builds the address
-/// separately and only that step knows the subscripts. Losing it costs
-/// precision and nothing else, so no attempt is made to chase the address
-/// through arithmetic.
-static bool subscriptsAreInRange(const Instruction *CtxI) {
+/// The metadata is accepted either on the access or on the address computation
+/// feeding it, since a frontend builds the address separately and only that
+/// step knows the subscripts. Losing it costs precision and nothing else, so no
+/// attempt is made to chase the address through arithmetic.
+static MDNode *getSubscriptsInRange(const Instruction *CtxI) {
   if (!CtxI)
-    return false;
-  if (CtxI->hasMetadata(LLVMContext::MD_subscripts_inrange))
-    return true;
+    return nullptr;
+  if (MDNode *MD = CtxI->getMetadata(LLVMContext::MD_subscripts_inrange))
+    return MD;
   const auto *Addr =
       dyn_cast_or_null<Instruction>(getLoadStorePointerOperand(CtxI));
-  return Addr && Addr->hasMetadata(LLVMContext::MD_subscripts_inrange);
+  return Addr ? Addr->getMetadata(LLVMContext::MD_subscripts_inrange) : nullptr;
+}
+
+/// Does the subscripts.inrange metadata \p MD describe the same array that
+/// delinearization arrived at in \p Sizes?
+///
+/// The operands of the metadata are the extents of the array from its
+/// fastest-varying dimension to its slowest, and \p Sizes holds what
+/// delinearization recovered from the address arithmetic: the same extents in
+/// the opposite order and without the slowest-varying one, whose extent never
+/// reaches the address, followed by the size of an element. Comparing them is
+/// what keeps a stale or mistaken claim from widening the analysis: a claim
+/// that does not describe this array is passed over, leaving the bounds to be
+/// established as they otherwise would be.
+///
+/// Metadata without operands states the guarantee for an array whose extents
+/// were not known at compile time. There is nothing to compare it against, so
+/// it is taken at its word.
+static bool describesRecoveredShape(const MDNode *MD,
+                                    ArrayRef<const SCEV *> Sizes) {
+  unsigned Rank = MD->getNumOperands();
+  if (Rank == 0)
+    return true;
+  if (Rank != Sizes.size())
+    return false;
+
+  for (unsigned K = 1; K < Rank; ++K) {
+    const auto *Declared =
+        mdconst::dyn_extract_or_null<ConstantInt>(MD->getOperand(Rank - 1 - K));
+    const auto *Recovered = dyn_cast<SCEVConstant>(Sizes[K - 1]);
+    if (!Declared || !Recovered)
+      return false;
+    if (!APInt::isSameValue(Recovered->getAPInt(), Declared->getValue()))
+      return false;
+  }
+  return true;
 }
 
 bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
@@ -721,7 +756,8 @@ bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
   // say so at the access instead, which is what subscripts.inrange records, and
   // then there is nothing left to establish. The overflow reasoning below rests
   // on these same bounds, so it still runs either way.
-  bool MustCheckRange = !subscriptsAreInRange(CtxI);
+  const MDNode *InRange = getSubscriptsInRange(CtxI);
+  bool MustCheckRange = !InRange || !describesRecoveredShape(InRange, Sizes);
   for (size_t I = 1; MustCheckRange && I < Sizes.size(); ++I) {
     const SCEV *Size = Sizes[I - 1];
     const SCEV *Subscript = Subscripts[I];

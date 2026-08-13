@@ -241,10 +241,13 @@ SmallVector<IntT> convertArrayToIndices(ArrayAttr attrs) {
 
 /// Name of the discardable attribute stating that the array access an operation
 /// performs uses subscripts that each stay within the extent of the dimension
-/// they select, as some source languages require. It is translated to the
-/// `subscripts.inrange` metadata on the corresponding LLVM IR instruction,
-/// which dependence analysis uses to recover the shape of an array from a
-/// flattened address.
+/// they select, as some source languages require. Its value lists the extents of
+/// the array from its fastest-varying dimension to its slowest, and is empty
+/// where they are not known at compile time.
+///
+/// It is translated to the `subscripts.inrange` metadata on the corresponding
+/// LLVM IR instruction, which dependence analysis uses to recover the shape of
+/// an array from a flattened address.
 inline StringRef getSubscriptsInRangeAttrName() {
   return "llvm.subscripts_inrange";
 }
