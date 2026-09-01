@@ -27,6 +27,7 @@
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionDivision.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -1888,6 +1889,27 @@ int LoopInterchangeProfitability::getInstrOrderCost() {
         GoodBasePtrs.insert(BasePtr);
       else if (SE->isKnownPredicate(ICmpInst::ICMP_SLT, OuterStep, InnerStep))
         BadBasePtrs.insert(BasePtr);
+      else {
+        // The strides could not be strictly ordered. This happens for
+        // parametric Fortran extents, whose stride is ElementSize *
+        // (1 + smax(0, ub-lb)): SCEV cannot prove an ordering because the
+        // extent might be zero for an empty array. If one stride divides the
+        // other exactly with a non-constant quotient, the dividend is a
+        // parametric multiple of the divisor, so the loop carrying it walks
+        // the larger stride and should be inner. Divide the raw coefficients
+        // rather than their absolute values: a sign-unknown parametric factor
+        // (e.g. sext of a runtime extent) gets wrapped by getAbsExpr into a
+        // form SCEVDivision cannot cancel, which would hide the relationship.
+        const SCEV *Q, *R;
+        SCEVDivision::divide(*SE, *InnerCoeff, *OuterCoeff, &Q, &R);
+        if (R->isZero() && !isa<SCEVConstant>(Q)) {
+          BadBasePtrs.insert(BasePtr);
+        } else {
+          SCEVDivision::divide(*SE, *OuterCoeff, *InnerCoeff, &Q, &R);
+          if (R->isZero() && !isa<SCEVConstant>(Q))
+            GoodBasePtrs.insert(BasePtr);
+        }
+      }
     }
   }
 
