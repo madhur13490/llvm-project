@@ -274,6 +274,11 @@ defm : BoolField<"use-lir-code-size-heurs", "true",
   "Use loop idiom recognition code size heuristics when compiling with -Os/-Oz">;
 
 // LoopInterchange.cpp
+// Allow a simple, inner-loop-invariant load between the two loops of a
+// candidate nest (an "almost tightly nested" loop). Gated while the
+// transform's re-homing of such instructions is validated.
+defm : BoolField<"loop-interchange-allow-inner-invariant-loads", "false",
+  "Permit an inner-loop-invariant load between the loops of a candidate nest (almost tightly nested).">;
 // Maximum loop depth supported.
 defm : ValueField<"loop-interchange-max-loop-nest-depth", "unsigned", "10",
   "Maximum depth of loop nest considered for the transform">;

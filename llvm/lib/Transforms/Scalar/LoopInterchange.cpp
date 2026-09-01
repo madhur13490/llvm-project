@@ -479,7 +479,8 @@ public:
 
 private:
   bool tightlyNested(Loop *Outer, Loop *Inner);
-  bool containsUnsafeInstructions(BasicBlock *BB, Instruction *Skip);
+  bool containsUnsafeInstructions(BasicBlock *BB, Instruction *Skip,
+                                  bool AllowInvariantLoads = false);
 
   /// Traverse all PHI nodes in the header of each loop in the loop nest
   /// starting from \p OuterLoop, and perform the following checks:
@@ -834,14 +835,26 @@ struct LoopInterchange {
 
 } // end anonymous namespace
 
-bool LoopInterchangeLegality::containsUnsafeInstructions(BasicBlock *BB,
-                                                         Instruction *Skip) {
-  return any_of(*BB, [Skip](const Instruction &I) {
+bool LoopInterchangeLegality::containsUnsafeInstructions(
+    BasicBlock *BB, Instruction *Skip, bool AllowInvariantLoads) {
+  return any_of(*BB, [Skip, AllowInvariantLoads, this](const Instruction &I) {
     if (&I == Skip)
       return false;
     if (auto *II = dyn_cast<IntrinsicInst>(&I))
       if (II->getIntrinsicID() == Intrinsic::assume)
         return false;
+    // A simple load whose address is invariant in the inner loop can sit
+    // between the loops: reordering it across the interchange is already
+    // vouched for by the dependence matrix (which analyzes every memory op in
+    // the nest), and the transform re-homes it. Allowing it lets a nest like
+    //   a(i,k,j) = mu(i,j) * a(i,k,j)
+    // interchange, where LICM hoisted mu(i,j) (invariant in the inner loop)
+    // into the outer loop body.
+    if (AllowInvariantLoads)
+      if (const auto *LI = dyn_cast<LoadInst>(&I))
+        if (LI->isSimple() &&
+            InnerLoop->isLoopInvariant(LI->getPointerOperand()))
+          return false;
     return I.mayHaveSideEffects() || I.mayReadFromMemory();
   });
 }
@@ -946,17 +959,26 @@ bool LoopInterchangeLegality::tightlyNested(Loop *OuterLoop, Loop *InnerLoop) {
   if (InnerReductions.size() == 1)
     Skip = InnerReductions[0].LcssaStore;
 
+  // Only relax the "no memory op between the loops" rule for a clean two-deep
+  // nest whose outer loop's sole child is the inner loop. Deeper or branching
+  // structure is left strict, so downstream passes that assume a simple chain
+  // (e.g. checkInductionsAndReductions) are not fed a nest they cannot handle.
+  bool AllowInvariantLoads = Opts.loop_interchange_allow_inner_invariant_loads &&
+                             OuterLoop->getSubLoops().size() == 1 &&
+                             OuterLoop->getSubLoops().front() == InnerLoop &&
+                             InnerLoop->getSubLoops().empty();
+
   // We do not have any basic block in between now make sure the outer header
   // and outer loop latch doesn't contain any unsafe instructions.
-  if (containsUnsafeInstructions(OuterLoopHeader, Skip) ||
-      containsUnsafeInstructions(OuterLoopLatch, Skip))
+  if (containsUnsafeInstructions(OuterLoopHeader, Skip, AllowInvariantLoads) ||
+      containsUnsafeInstructions(OuterLoopLatch, Skip, AllowInvariantLoads))
     return false;
 
   // Also make sure the inner loop preheader does not contain any unsafe
   // instructions. Note that all instructions in the preheader will be moved to
   // the outer loop header when interchanging.
   if (InnerLoopPreHeader != OuterLoopHeader &&
-      containsUnsafeInstructions(InnerLoopPreHeader, Skip))
+      containsUnsafeInstructions(InnerLoopPreHeader, Skip, AllowInvariantLoads))
     return false;
 
   BasicBlock *InnerLoopExit = InnerLoop->getExitBlock();
@@ -1336,6 +1358,18 @@ bool LoopInterchangeLegality::isInnerReduction(
 }
 
 bool LoopInterchangeLegality::checkInductionsAndReductions(Loop *OuterLoop) {
+  // This routine, and the interchange it gates, only understands a nest that
+  // is a simple chain: each loop has at most one child loop. Bail out
+  // conservatively otherwise instead of asserting, since a candidate outer
+  // loop can legitimately contain sibling inner loops (e.g. once improved
+  // delinearization lets such a nest be considered at all).
+  for (Loop *L = OuterLoop; L; L = L->getSubLoops().front()) {
+    if (L->getSubLoops().size() > 1)
+      return false;
+    if (L->getSubLoops().empty())
+      break;
+  }
+
   auto ChildLoop = [](Loop *L) {
     assert(L->getSubLoops().size() <= 1 &&
            "Expect at most one child loop for now.");
