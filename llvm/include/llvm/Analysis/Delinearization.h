@@ -20,6 +20,7 @@
 namespace llvm {
 class raw_ostream;
 template <typename T> class SmallVectorImpl;
+class CallBase;
 class GetElementPtrInst;
 class Instruction;
 class ScalarEvolution;
@@ -145,9 +146,19 @@ delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
 /// Check that each subscript in \p Subscripts is within the corresponding size
 /// in \p Sizes. For the outermost dimension, the subscript being negative is
 /// allowed.
+///
+/// \p CtxI is the access the subscripts were recovered from, where a frontend
+/// records what it knows about the array being accessed.
 LLVM_ABI bool validateDelinearizationResult(ScalarEvolution &SE,
                                             ArrayRef<const SCEV *> Sizes,
-                                            ArrayRef<const SCEV *> Subscripts);
+                                            ArrayRef<const SCEV *> Subscripts,
+                                            const Instruction *CtxI = nullptr);
+
+/// The 'llvm.assume.chained' call whose result the address of the load or
+/// store \p Access is derived from, if the call states the extents of the
+/// array being accessed. Such a call guarantees that the subscripts of the
+/// access each stay within their own dimension.
+LLVM_ABI const CallBase *getArrayExtentsAssumption(const Instruction *Access);
 
 /// Gathers the individual index expressions from a GEP instruction.
 ///

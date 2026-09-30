@@ -45,6 +45,12 @@ cl::opt<bool> skipExternalRttiDefinition(
                    "other compilation units"),
     cl::Hidden);
 
+cl::opt<bool> enableArrayExtentsAssumption(
+    "enable-array-extents-assumption",
+    cl::desc("state the extents of an array at the accesses whose subscripts "
+             "must stay within them (only at -O2 and above)"),
+    cl::init(false), cl::Hidden);
+
 OptimizationLevel defaultOptLevel{OptimizationLevel::O0};
 
 codegenoptions::DebugInfoKind noDebugInfo{codegenoptions::NoDebugInfo};
