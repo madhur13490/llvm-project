@@ -1766,6 +1766,40 @@ bool DependenceInfo::testMIV(const SCEV *Src, const SCEV *Dst,
          banerjeeMIVtest(Src, Dst, Loops, Result);
 }
 
+/// Return true when Expr is a two-level mixed-radix recurrence
+/// `Outer * TripCount(Inner) + Inner`. With no-wrap recurrences and a unit-step
+/// inner loop, this maps each pair of normalized loop iterations to a distinct
+/// integer.
+static bool isKnownInjectiveTwoLevelAddRec(const SCEV *Expr,
+                                           ScalarEvolution &SE,
+                                           const Instruction *CtxI) {
+  const auto *InnerAR = dyn_cast<SCEVAddRecExpr>(Expr);
+  if (!InnerAR || !InnerAR->isAffine() || !InnerAR->hasNoSignedWrap())
+    return false;
+
+  const auto *OuterAR = dyn_cast<SCEVAddRecExpr>(InnerAR->getStart());
+  if (!OuterAR || !OuterAR->isAffine() || !OuterAR->hasNoSignedWrap() ||
+      SE.containsAddRecurrence(OuterAR->getStart()))
+    return false;
+
+  const Loop *InnerLoop = InnerAR->getLoop();
+  const Loop *OuterLoop = OuterAR->getLoop();
+  if (!OuterLoop->contains(InnerLoop) ||
+      !InnerAR->getStepRecurrence(SE)->isOne())
+    return false;
+
+  const SCEV *InnerBTC = SE.getBackedgeTakenCount(InnerLoop);
+  if (isa<SCEVCouldNotCompute>(InnerBTC))
+    return false;
+
+  const SCEV *Radix =
+      SE.getAddExpr(InnerBTC, SE.getOne(InnerBTC->getType()));
+  const SCEV *OuterStep = OuterAR->getStepRecurrence(SE);
+  return !SE.containsAddRecurrence(OuterStep) && Radix == OuterStep &&
+         SE.isKnownPredicateAt(ICmpInst::ICMP_SGT, OuterStep,
+                               SE.getZero(OuterStep->getType()), CtxI);
+}
+
 /// Given a SCEVMulExpr, returns its first operand if its first operand is a
 /// constant and the product doesn't overflow in a signed sense. Otherwise,
 /// returns std::nullopt. For example, given (10 * X * Y)<nsw>, it returns 10.
@@ -2765,10 +2799,12 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
   SmallVector<Subscript, 2> Pair(Pairs);
   Pair[0].Src = SrcEv;
   Pair[0].Dst = DstEv;
+  bool HasValidatedDelinearization = false;
   if (Delinearize) {
     if (tryDelinearize(Src, Dst, Pair)) {
       LLVM_DEBUG(dbgs() << "    delinearized\n");
       Pairs = Pair.size();
+      HasValidatedDelinearization = !DisableDelinearizationChecks;
     }
   }
 
@@ -2820,6 +2856,19 @@ DependenceInfo::depends(Instruction *Src, Instruction *Dst,
     LLVM_DEBUG(dbgs() << "\tclass = " << Pair[P].Classification << "\n");
     LLVM_DEBUG(dbgs() << "\tloops = ");
     LLVM_DEBUG(dumpSmallBitVector(Pair[P].Loops));
+
+    // A validated delinearization is injective from its subscript tuple to the
+    // flat address. For a self-access, an injective subscript additionally
+    // proves that equality of this subscript requires equality in each loop
+    // used by that subscript.
+    if (Src == Dst && HasValidatedDelinearization &&
+        Pair[P].Src == Pair[P].Dst &&
+        isKnownInjectiveTwoLevelAddRec(Pair[P].Src, *SE, Src)) {
+      LLVM_DEBUG(dbgs() << "\tself subscript is injective\n");
+      for (unsigned Level : Pair[P].Loops.set_bits())
+        if (Level > 0 && Level <= CommonLevels)
+          Result.DV[Level - 1].Direction &= Dependence::DVEntry::EQ;
+    }
   }
 
   // Test each subscript individually
