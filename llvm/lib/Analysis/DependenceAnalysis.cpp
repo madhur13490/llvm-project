@@ -2523,15 +2523,19 @@ bool DependenceInfo::tryDelinearizeFixedSize(
   const SCEV *ElemSize = SE->getElementSize(Src);
   assert(ElemSize == SE->getElementSize(Dst) && "Different element sizes");
   SmallVector<const SCEV *, 4> SrcSizes, DstSizes;
+  DelinearizationShapeKind SrcShapeKind, DstShapeKind;
   if (!delinearizeFixedSizeArray(*SE, SrcAccessFn,
-                                 SrcSubscripts, SrcSizes, ElemSize) ||
+                                  SrcSubscripts, SrcSizes, ElemSize,
+                                  SrcShapeKind) ||
       !delinearizeFixedSizeArray(*SE, DstAccessFn,
-                                 DstSubscripts, DstSizes, ElemSize))
+                                  DstSubscripts, DstSizes, ElemSize,
+                                  DstShapeKind))
     return false;
 
   // Check that the two size arrays are non-empty and equal in length and
   // value.  SCEV expressions are uniqued, so we can compare pointers.
-  if (SrcSizes.size() != DstSizes.size() ||
+  if (SrcShapeKind != DstShapeKind ||
+      SrcSizes.size() != DstSizes.size() ||
       !std::equal(SrcSizes.begin(), SrcSizes.end(), DstSizes.begin())) {
     SrcSubscripts.clear();
     DstSubscripts.clear();
@@ -2549,8 +2553,10 @@ bool DependenceInfo::tryDelinearizeFixedSize(
   // iff the subscripts are positive and are less than the range of the
   // dimension.
   if (!DisableDelinearizationChecks) {
-    if (!validateDelinearizationResult(*SE, SrcSizes, SrcSubscripts) ||
-        !validateDelinearizationResult(*SE, DstSizes, DstSubscripts)) {
+    if (!validateDelinearizationResult(*SE, SrcSizes, SrcSubscripts,
+                                       SrcShapeKind, Src) ||
+        !validateDelinearizationResult(*SE, DstSizes, DstSubscripts,
+                                       DstShapeKind, Dst)) {
       SrcSubscripts.clear();
       DstSubscripts.clear();
       return false;
@@ -2613,8 +2619,12 @@ bool DependenceInfo::tryDelinearizeParametricSize(
   // FIXME: It may be better to record these sizes and add them as constraints
   // to the dependency checks.
   if (!DisableDelinearizationChecks)
-    if (!validateDelinearizationResult(*SE, Sizes, SrcSubscripts) ||
-        !validateDelinearizationResult(*SE, Sizes, DstSubscripts))
+    if (!validateDelinearizationResult(
+            *SE, Sizes, SrcSubscripts,
+            DelinearizationShapeKind::UnknownOuterDimension, Src) ||
+        !validateDelinearizationResult(
+            *SE, Sizes, DstSubscripts,
+            DelinearizationShapeKind::UnknownOuterDimension, Dst))
       return false;
 
   return true;

@@ -16,10 +16,10 @@
 define void @test_2d_array(i64 %i, i64 %j, i64 %N, i64 %M) {
 ; CHECK-LABEL: 'test_2d_array'
 ; CHECK-NEXT:  Inst: %val = load i32, ptr %gepij, align 4
-; CHECK-NEXT:  AccessFunction: {{\{\{}}0,+,80}<%for.i>,+,4}<%for.j>
+; CHECK-NEXT:  AccessFunction: {{\{\{}}0,+,80}<nuw><nsw><%for.i>,+,4}<%for.j>
 ; CHECK-NEXT:  Base offset: @test_array_10x20
 ; CHECK-NEXT:  ArrayDecl[10][20] with elements of 4 bytes.
-; CHECK-NEXT:  ArrayRef[{0,+,1}<nuw><%for.i>][{0,+,1}<nuw><nsw><%for.j>]
+; CHECK-NEXT:  ArrayRef[{0,+,1}<nuw><nsw><%for.i>][{0,+,1}<nuw><nsw><%for.j>]
 ; CHECK-NEXT:  Delinearization validation: Succeeded
 ;
 entry:
@@ -34,6 +34,10 @@ for.i:
 for.j:
   %j.cur = phi i64 [ 0, %for.i ], [ %j.next, %for.j ]
   %gepij = getelementptr inbounds nuw i32, ptr %gepi, i64 %j.cur
+  %i.inrange = icmp ult i64 %i.cur, 10
+  %j.inrange = icmp ult i64 %j.cur, 20
+  call void @llvm.assume(i1 %i.inrange)
+  call void @llvm.assume(i1 %j.inrange)
   %val = load i32, ptr %gepij, align 4
   %j.next = add i64 %j.cur, 1
   %j.cmp = icmp slt i64 %j.next, %M
@@ -48,3 +52,5 @@ exit:
 }
 
 !0 = !{i64 10, i64 20}
+
+declare void @llvm.assume(i1 noundef)

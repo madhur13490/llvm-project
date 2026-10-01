@@ -12,6 +12,18 @@
 ; Array without metadata (fallback to type-based extraction)
 @no_metadata_array = global [15 x [25 x i32]] zeroinitializer
 
+; A valid one-dimensional shape must not require two pre-existing sizes.
+@one_dimensional_array = global [100 x i32] zeroinitializer, !array.dims !2
+
+; Incomplete metadata must be ignored as a whole, not used as a partial shape.
+@incomplete_metadata_array = global [10 x [20 x i32]] zeroinitializer, !array.dims !3
+
+; Symbolic loop strides cannot be recovered by the constant-stride fallback.
+@symbolic_stride_array = global [1000 x i32] zeroinitializer, !array.dims !4
+
+; A zero extent is malformed and must force conservative fallback.
+@malformed_metadata_array = global [10 x [20 x i32]] zeroinitializer, !array.dims !5
+
 define void @test_c_array_metadata(i64 %i, i64 %j) {
 ; CHECK-LABEL: 'test_c_array_metadata'
 ; CHECK-NEXT:  Inst: %v = load i32, ptr %arrayidx, align 4
@@ -121,9 +133,145 @@ exit:
   ret void
 }
 
+define void @test_one_dimensional_metadata() {
+; CHECK-LABEL: 'test_one_dimensional_metadata'
+; CHECK-NEXT:  Inst: %v = load i32, ptr %arrayidx, align 4
+; CHECK-NEXT:  AccessFunction: {0,+,4}<nuw><nsw><%loop>
+; CHECK-NEXT:  Base offset: @one_dimensional_array
+; CHECK-NEXT:  ArrayDecl[100] with elements of 4 bytes.
+; CHECK-NEXT:  ArrayRef[{0,+,1}<nuw><nsw><%loop>]
+; CHECK-NEXT:  Delinearization validation: Succeeded
+;
+entry:
+  br label %loop
+
+loop:
+  %iv = phi i64 [ 0, %entry ], [ %iv.next, %loop ]
+  %arrayidx = getelementptr inbounds [100 x i32], ptr @one_dimensional_array, i64 0, i64 %iv
+  %v = load i32, ptr %arrayidx, align 4
+  %iv.next = add nuw nsw i64 %iv, 1
+  %exit = icmp eq i64 %iv.next, 100
+  br i1 %exit, label %return, label %loop
+
+return:
+  ret void
+}
+
+define void @test_incomplete_metadata_fallback() {
+; CHECK-LABEL: 'test_incomplete_metadata_fallback'
+; CHECK-NEXT:  Inst: %v = load i32, ptr %arrayidx, align 4
+; CHECK-NEXT:  AccessFunction: {{\{\{}}0,+,80}<nuw><nsw><%outer>,+,4}<nuw><nsw><%inner>
+; CHECK-NEXT:  Base offset: @incomplete_metadata_array
+; CHECK-NEXT:  ArrayDecl[UnknownSize][20] with elements of 4 bytes.
+; CHECK-NEXT:  ArrayRef[{0,+,1}<nuw><nsw><%outer>][{0,+,1}<nuw><nsw><%inner>]
+; CHECK-NEXT:  Delinearization validation: Succeeded
+;
+entry:
+  br label %outer
+
+outer:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %outer.latch ]
+  br label %inner
+
+inner:
+  %j = phi i64 [ 0, %outer ], [ %j.next, %inner ]
+  %arrayidx = getelementptr inbounds [10 x [20 x i32]], ptr @incomplete_metadata_array, i64 0, i64 %i, i64 %j
+  %v = load i32, ptr %arrayidx, align 4
+  %j.next = add nuw nsw i64 %j, 1
+  %j.exit = icmp eq i64 %j.next, 20
+  br i1 %j.exit, label %outer.latch, label %inner
+
+outer.latch:
+  %i.next = add nuw nsw i64 %i, 1
+  %i.exit = icmp eq i64 %i.next, 10
+  br i1 %i.exit, label %return, label %outer
+
+return:
+  ret void
+}
+
+define void @test_symbolic_stride_metadata(i64 %n) {
+; CHECK-LABEL: 'test_symbolic_stride_metadata'
+; CHECK-NEXT:  Inst: %v = load i32, ptr %arrayidx, align 4
+; CHECK-NEXT:  AccessFunction: {{\{\{}}0,+,(4 * %n)}<%outer>,+,4}<%inner>
+; CHECK-NEXT:  Base offset: @symbolic_stride_array
+; CHECK-NEXT:  ArrayDecl[1000] with elements of 4 bytes.
+; CHECK-NEXT:  ArrayRef[{{\{\{}}0,+,%n}<nsw><%outer>,+,1}<nsw><%inner>]
+; CHECK-NEXT:  Delinearization validation: Succeeded
+;
+entry:
+  %n.positive = icmp sgt i64 %n, 0
+  call void @llvm.assume(i1 %n.positive)
+  br label %outer
+
+outer:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %outer.latch ]
+  br label %inner
+
+inner:
+  %j = phi i64 [ 0, %outer ], [ %j.next, %inner ]
+  %i.stride = mul nsw i64 %i, %n
+  %subscript = add nsw i64 %i.stride, %j
+  %subscript.inrange = icmp ult i64 %subscript, 1000
+  call void @llvm.assume(i1 %subscript.inrange)
+  %arrayidx = getelementptr inbounds i32, ptr @symbolic_stride_array, i64 %subscript
+  %v = load i32, ptr %arrayidx, align 4
+  %j.next = add nuw nsw i64 %j, 1
+  %j.exit = icmp eq i64 %j.next, %n
+  br i1 %j.exit, label %outer.latch, label %inner
+
+outer.latch:
+  %i.next = add nuw nsw i64 %i, 1
+  %i.exit = icmp eq i64 %i.next, 10
+  br i1 %i.exit, label %return, label %outer
+
+return:
+  ret void
+}
+
+define void @test_malformed_metadata_fallback() {
+; CHECK-LABEL: 'test_malformed_metadata_fallback'
+; CHECK-NEXT:  Inst: %v = load i32, ptr %arrayidx, align 4
+; CHECK-NEXT:  AccessFunction: {{\{\{}}0,+,80}<nuw><nsw><%outer>,+,4}<nuw><nsw><%inner>
+; CHECK-NEXT:  Base offset: @malformed_metadata_array
+; CHECK-NEXT:  ArrayDecl[UnknownSize][20] with elements of 4 bytes.
+; CHECK-NEXT:  ArrayRef[{0,+,1}<nuw><nsw><%outer>][{0,+,1}<nuw><nsw><%inner>]
+; CHECK-NEXT:  Delinearization validation: Succeeded
+;
+entry:
+  br label %outer
+
+outer:
+  %i = phi i64 [ 0, %entry ], [ %i.next, %outer.latch ]
+  br label %inner
+
+inner:
+  %j = phi i64 [ 0, %outer ], [ %j.next, %inner ]
+  %arrayidx = getelementptr inbounds [10 x [20 x i32]], ptr @malformed_metadata_array, i64 0, i64 %i, i64 %j
+  %v = load i32, ptr %arrayidx, align 4
+  %j.next = add nuw nsw i64 %j, 1
+  %j.exit = icmp eq i64 %j.next, 20
+  br i1 %j.exit, label %outer.latch, label %inner
+
+outer.latch:
+  %i.next = add nuw nsw i64 %i, 1
+  %i.exit = icmp eq i64 %i.next, 10
+  br i1 %i.exit, label %return, label %outer
+
+return:
+  ret void
+}
+
 ; C array sizes: 10, 20
 !0 = !{i64 10, i64 20}
 
 ; Fortran array sizes in memory layout order (column-major reverses dimensions).
 ; Source: real arr(5, 10) → Memory: [10 x [5 x ...]] → Metadata sizes: 10, 5
 !1 = !{i64 10, i64 5}
+
+!2 = !{i64 100}
+!3 = !{i64 10}
+!4 = !{i64 1000}
+!5 = !{i64 10, i64 0}
+
+declare void @llvm.assume(i1 noundef)
