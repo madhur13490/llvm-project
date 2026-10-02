@@ -1635,8 +1635,9 @@ bool LoopInterchangeLegality::canInterchangeLoops(unsigned InnerLoopId,
   // Check if outer and inner loop contain legal instructions only.
   for (auto *BB : OuterLoop->blocks())
     for (Instruction &I : *BB) {
-      // Loads and stores are checked separately, so we can skip them here.
-      if (isa<LoadInst, StoreInst, PseudoProbeInst>(&I))
+      // Loads and stores are checked separately. llvm.assume has no runtime
+      // behavior and is already accepted by containsUnsafeInstructions().
+      if (isa<LoadInst, StoreInst, PseudoProbeInst, AssumeInst>(&I))
         continue;
 
       // We cannot ignore potential memory reads, e.g., loads inside the called

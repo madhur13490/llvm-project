@@ -62,8 +62,14 @@ target datalayout = "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i6
 ; CHECK:       Name:            Dependence
 ; CHECK:         - String:          Cannot interchange loops due to dependences.
 ; CHECK:       --- !Missed
-; CHECK:       Name:            UnsafeInst
-; CHECK:         - String:          Cannot interchange loops due to instruction that is potentially unsafe to interchange.
+; CHECK:       Name:            NotTightlyNested
+; CHECK:         - String:          Cannot interchange loops because they are not tightly nested.
+; CHECK:       --- !Missed
+; CHECK:       Name:            InterchangeNotProfitable
+; CHECK:         - String:          Insufficient information to calculate the cost of loop for interchange.
+; CHECK:       --- !Missed
+; CHECK:       Name:            InterchangeNotProfitable
+; CHECK:         - String:          Insufficient information to calculate the cost of loop for interchange.
 ; CHECK:       --- !Missed
 ; CHECK:       Name:            Dependence
 ; CHECK:         - String:          All loops have dependencies in all directions.
