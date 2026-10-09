@@ -36,6 +36,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
@@ -58,6 +59,8 @@ using namespace llvm;
 #define DEBUG_TYPE "loop-interchange"
 
 STATISTIC(LoopsInterchanged, "Number of loops interchanged");
+STATISTIC(AssumeChainedSeen,
+          "Number of llvm.assume.chained calls seen by loop interchange");
 
 static cl::opt<int> LoopInterchangeCostThreshold(
     "loop-interchange-threshold", cl::init(0), cl::Hidden,
@@ -82,6 +85,19 @@ static cl::opt<unsigned int> MaxMemInstrRatio(
 namespace {
 
 using LoopVector = SmallVector<Loop *, 8>;
+
+static SmallSet<const Function *, 16> CountedFunctions;
+
+static void countAssumeChainedCalls(const Function &F) {
+  if (!CountedFunctions.insert(&F).second)
+    return;
+
+  for (const BasicBlock &BB : F)
+    for (const Instruction &I : BB)
+      if (const auto *Call = dyn_cast<CallBase>(&I))
+        if (Call->getIntrinsicID() == Intrinsic::assume_chained)
+          ++AssumeChainedSeen;
+}
 
 /// A list of direction vectors. Each entry represents a direction vector
 /// corresponding to one or more dependencies existing in the loop nest. The
@@ -2773,6 +2789,7 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
                                            LoopStandardAnalysisResults &AR,
                                            LPMUpdater &U) {
   Function &F = *LN.getParent();
+  countAssumeChainedCalls(F);
 
   OptimizationRemarkEmitter ORE(&F);
 
