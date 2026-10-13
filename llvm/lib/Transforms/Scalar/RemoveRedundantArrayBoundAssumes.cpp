@@ -8,10 +8,10 @@
 //
 // Fortran lowering can attach !llvm.array.bounds metadata to llvm.assume
 // intrinsics that encode declared array-dimension bounds (e.g. 1 <= idx <= 54).
-// Multiple array accesses along the same dimension produce identical bound
-// checks even though the index expressions differ.  This pass keeps only the
-// first assume for each unique (predicate, constant-bound) pair per function,
-// removing all later duplicates together with any dead feeding instructions.
+// Multiple array accesses can produce identical checks of the same SSA value.
+// This pass keeps only the first assume in a basic block for each unique
+// compared value, predicate, and constant bound. Restricting elimination to a
+// block guarantees that the retained assume dominates each removed duplicate.
 //
 //===----------------------------------------------------------------------===//
 
@@ -35,14 +35,14 @@ RemoveRedundantArrayBoundAssumesPass::run(Module &M,
     if (F.isDeclaration())
       continue;
 
-    // Key: (predicate, constant bound).  Two assumes that test against the
-    // same constant with the same relational operator are redundant regardless
-    // of which SSA value is being compared.
-    using BoundsKey = std::pair<CmpInst::Predicate, int64_t>;
-    std::set<BoundsKey> SeenBounds;
+    // Different indices are not interchangeable facts even when they use the
+    // same predicate and bound.
+    using BoundsKey =
+        std::tuple<CmpInst::Predicate, Value *, ConstantInt *>;
     SmallVector<Instruction *, 16> ToDelete;
 
     for (BasicBlock &BB : F) {
+      std::set<BoundsKey> SeenBounds;
       for (Instruction &I : BB) {
         auto *Assume = dyn_cast<AssumeInst>(&I);
         if (!Assume)
@@ -56,13 +56,18 @@ RemoveRedundantArrayBoundAssumesPass::run(Module &M,
         if (!ICmp)
           continue;
 
+        CmpInst::Predicate Pred = ICmp->getPredicate();
+        Value *Compared = ICmp->getOperand(0);
         ConstantInt *Bound = dyn_cast<ConstantInt>(ICmp->getOperand(1));
-        if (!Bound)
+        if (!Bound) {
           Bound = dyn_cast<ConstantInt>(ICmp->getOperand(0));
+          Compared = ICmp->getOperand(1);
+          Pred = ICmp->getSwappedPredicate();
+        }
         if (!Bound)
           continue;
 
-        BoundsKey Key(ICmp->getPredicate(), Bound->getSExtValue());
+        BoundsKey Key(Pred, Compared, Bound);
         if (!SeenBounds.insert(Key).second)
           ToDelete.push_back(Assume);
       }
@@ -82,7 +87,5 @@ RemoveRedundantArrayBoundAssumesPass::run(Module &M,
   if (!Changed)
     return PreservedAnalyses::all();
 
-  PreservedAnalyses PA;
-  PA.preserveSet<AllAnalysesOn<Function>>();
-  return PA;
+  return PreservedAnalyses::none();
 }
