@@ -15,7 +15,6 @@
 #include "flang/Frontend/CompilerInvocation.h"
 #include "flang/Frontend/FrontendOptions.h"
 #include "flang/Frontend/ParserActions.h"
-#include "llvm/Transforms/Scalar/RemoveRedundantArrayBoundAssumes.h"
 #include "flang/Lower/Bridge.h"
 #include "flang/Lower/Support/Verifier.h"
 #include "flang/Optimizer/Dialect/FIRAttr.h"
@@ -1058,14 +1057,6 @@ void CodeGenAction::runOptimizationPipeline(llvm::raw_pwrite_stream &os) {
   pb.registerFunctionAnalyses(fam);
   pb.registerLoopAnalyses(lam);
   pb.crossRegisterProxies(lam, fam, cgam, mam);
-
-  // Register Flang-specific early passes. This removes duplicate
-  // llvm.assume intrinsics for static array bounds before the main
-  // optimization pipeline runs.
-  pb.registerPipelineStartEPCallback(
-      [](llvm::ModulePassManager &MPM, llvm::OptimizationLevel) {
-        MPM.addPass(llvm::RemoveRedundantArrayBoundAssumesPass());
-      });
 
   // Create the pass manager.
   llvm::ModulePassManager mpm;

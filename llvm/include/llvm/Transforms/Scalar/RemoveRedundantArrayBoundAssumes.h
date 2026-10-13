@@ -6,11 +6,8 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// Removes redundant llvm.assume intrinsics that carry !llvm.array.bounds
-// metadata. Fortran lowering can produce multiple identical assume bundles
-// for static array index bounds (e.g. 1 <= IV <= 54) across different uses
-// of the same induction variable. Only the first unique assume in each basic
-// block is kept, so the retained fact dominates every removed duplicate.
+// Removes llvm.assume intrinsics that carry !llvm.array.bounds metadata after
+// their final intended consumer and deletes dead instructions feeding them.
 //
 //===----------------------------------------------------------------------===//
 
@@ -24,7 +21,7 @@ namespace llvm {
 class RemoveRedundantArrayBoundAssumesPass
     : public OptionalPassInfoMixin<RemoveRedundantArrayBoundAssumesPass> {
 public:
-  PreservedAnalyses run(Module &M, ModuleAnalysisManager &AM);
+  PreservedAnalyses run(Function &F, FunctionAnalysisManager &AM);
 };
 
 } // namespace llvm
