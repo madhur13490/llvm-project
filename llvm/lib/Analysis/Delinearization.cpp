@@ -775,29 +775,25 @@ static bool isKnownInRange(ScalarEvolution &SE, const SCEV *Subscript,
   };
 
   const SCEV *Zero = SE.getZero(WiderTy);
-  bool InSignedRange =
-      IsKnownPredicate(ICmpInst::ICMP_SGE, Subscript, Zero) &&
-      IsKnownPredicate(ICmpInst::ICMP_SLT, Subscript, Size);
-  bool InUnsignedRange =
-      IsKnownPredicate(ICmpInst::ICMP_SGT, Size, Zero) &&
-      IsKnownPredicate(ICmpInst::ICMP_ULT, Subscript, Size);
+  if (IsKnownPredicate(ICmpInst::ICMP_SGE, Subscript, Zero) &&
+      IsKnownPredicate(ICmpInst::ICMP_SLT, Subscript, Size))
+    return true;
+  if (IsKnownPredicate(ICmpInst::ICMP_SGT, Size, Zero) &&
+      IsKnownPredicate(ICmpInst::ICMP_ULT, Subscript, Size))
+    return true;
 
   // Frontends for one-based languages naturally express the equivalent range
   // on Subscript + 1. Accept both the signed form 1 <= X <= Size and Flang's
   // unsigned form X != 0 && X <u Size + 1.
   const SCEV *OneBased =
       SE.getAddExpr(Subscript, SE.getOne(Subscript->getType()));
-  bool InOneBasedSignedRange =
-      IsKnownPredicate(ICmpInst::ICMP_SGT, OneBased, Zero) &&
-      IsKnownPredicate(ICmpInst::ICMP_SLE, OneBased, Size);
+  if (IsKnownPredicate(ICmpInst::ICMP_SGT, OneBased, Zero) &&
+      IsKnownPredicate(ICmpInst::ICMP_SLE, OneBased, Size))
+    return true;
   const SCEV *SizePlusOne =
       SE.getAddExpr(Size, SE.getOne(Size->getType()));
-  bool InOneBasedUnsignedRange =
-      IsKnownPredicate(ICmpInst::ICMP_NE, OneBased, Zero) &&
-      IsKnownPredicate(ICmpInst::ICMP_ULT, OneBased, SizePlusOne);
-
-  return InSignedRange || InUnsignedRange || InOneBasedSignedRange ||
-         InOneBasedUnsignedRange;
+  return IsKnownPredicate(ICmpInst::ICMP_NE, OneBased, Zero) &&
+         IsKnownPredicate(ICmpInst::ICMP_ULT, OneBased, SizePlusOne);
 }
 
 bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
