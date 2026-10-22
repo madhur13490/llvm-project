@@ -27,6 +27,7 @@
 #include "llvm/Analysis/LoopPass.h"
 #include "llvm/Analysis/OptimizationRemarkEmitter.h"
 #include "llvm/Analysis/ScalarEvolution.h"
+#include "llvm/Analysis/ScalarEvolutionDivision.h"
 #include "llvm/Analysis/ScalarEvolutionExpressions.h"
 #include "llvm/IR/BasicBlock.h"
 #include "llvm/IR/DiagnosticInfo.h"
@@ -36,6 +37,7 @@
 #include "llvm/IR/InstrTypes.h"
 #include "llvm/IR/Instruction.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/Intrinsics.h"
 #include "llvm/IR/User.h"
 #include "llvm/IR/Value.h"
 #include "llvm/IR/Verifier.h"
@@ -57,10 +59,25 @@ using namespace llvm;
 #define DEBUG_TYPE "loop-interchange"
 
 STATISTIC(LoopsInterchanged, "Number of loops interchanged");
+STATISTIC(AssumeChainedSeen,
+          "Number of llvm.assume.chained calls seen by loop interchange");
 
 namespace {
 
 using LoopVector = SmallVector<Loop *, 8>;
+
+static SmallSet<const Function *, 16> CountedFunctions;
+
+static void countAssumeChainedCalls(const Function &F) {
+  if (!CountedFunctions.insert(&F).second)
+    return;
+
+  for (const BasicBlock &BB : F)
+    for (const Instruction &I : BB)
+      if (const auto *Call = dyn_cast<CallBase>(&I))
+        if (Call->getIntrinsicID() == Intrinsic::assume_chained)
+          ++AssumeChainedSeen;
+}
 
 /// A list of direction vectors. Each entry represents a direction vector
 /// corresponding to one or more dependencies existing in the loop nest. The
@@ -476,7 +493,8 @@ public:
 
 private:
   bool tightlyNested(Loop *Outer, Loop *Inner);
-  bool containsUnsafeInstructions(BasicBlock *BB, Instruction *Skip);
+  bool containsUnsafeInstructions(BasicBlock *BB, Instruction *Skip,
+                                  bool AllowInvariantLoads = false);
 
   /// Traverse all PHI nodes in the header of each loop in the loop nest
   /// starting from \p OuterLoop, and perform the following checks:
@@ -831,11 +849,23 @@ struct LoopInterchange {
 
 } // end anonymous namespace
 
-bool LoopInterchangeLegality::containsUnsafeInstructions(BasicBlock *BB,
-                                                         Instruction *Skip) {
-  return any_of(*BB, [Skip](const Instruction &I) {
+bool LoopInterchangeLegality::containsUnsafeInstructions(
+    BasicBlock *BB, Instruction *Skip, bool AllowInvariantLoads) {
+  return any_of(*BB, [Skip, AllowInvariantLoads, this](const Instruction &I) {
     if (&I == Skip)
       return false;
+    // A simple load whose address is invariant in the inner loop can sit
+    // between the loops: reordering it across the interchange is already
+    // vouched for by the dependence matrix (which analyzes every memory op in
+    // the nest), and the transform re-homes it. Allowing it lets a nest like
+    //   a(i,k,j) = mu(i,j) * a(i,k,j)
+    // interchange, where LICM hoisted mu(i,j) (invariant in the inner loop)
+    // into the outer loop body.
+    if (AllowInvariantLoads)
+      if (const auto *LI = dyn_cast<LoadInst>(&I))
+        if (LI->isSimple() &&
+            InnerLoop->isLoopInvariant(LI->getPointerOperand()))
+          return false;
     return I.mayHaveSideEffects() || I.mayReadFromMemory();
   });
 }
@@ -940,17 +970,23 @@ bool LoopInterchangeLegality::tightlyNested(Loop *OuterLoop, Loop *InnerLoop) {
   if (InnerReductions.size() == 1)
     Skip = InnerReductions[0].LcssaStore;
 
+  // Only relax the "no memory op between the loops" rule when the inner loop is
+  // innermost; a pair further out is left strict.
+  bool AllowInvariantLoads =
+      Opts.loop_interchange_allow_inner_invariant_loads &&
+      InnerLoop->isInnermost();
+
   // We do not have any basic block in between now make sure the outer header
   // and outer loop latch doesn't contain any unsafe instructions.
-  if (containsUnsafeInstructions(OuterLoopHeader, Skip) ||
-      containsUnsafeInstructions(OuterLoopLatch, Skip))
+  if (containsUnsafeInstructions(OuterLoopHeader, Skip, AllowInvariantLoads) ||
+      containsUnsafeInstructions(OuterLoopLatch, Skip, AllowInvariantLoads))
     return false;
 
   // Also make sure the inner loop preheader does not contain any unsafe
   // instructions. Note that all instructions in the preheader will be moved to
   // the outer loop header when interchanging.
   if (InnerLoopPreHeader != OuterLoopHeader &&
-      containsUnsafeInstructions(InnerLoopPreHeader, Skip))
+      containsUnsafeInstructions(InnerLoopPreHeader, Skip, AllowInvariantLoads))
     return false;
 
   BasicBlock *InnerLoopExit = InnerLoop->getExitBlock();
@@ -1882,6 +1918,23 @@ int LoopInterchangeProfitability::getInstrOrderCost() {
         GoodBasePtrs.insert(BasePtr);
       else if (SE->isKnownPredicate(ICmpInst::ICMP_SLT, OuterStep, InnerStep))
         BadBasePtrs.insert(BasePtr);
+      else {
+        // The strides could not be strictly ordered, e.g. 8 and 8*n for a
+        // runtime extent n that may be 1. If one divides the other exactly
+        // with a non-constant quotient, it is a parametric multiple of the
+        // other and its loop should be outer. Divide the raw coefficients:
+        // getAbsExpr wraps a sign-unknown factor (e.g. the sext of a runtime
+        // extent) in a form SCEVDivision cannot cancel.
+        const SCEV *Q, *R;
+        SCEVDivision::divide(*SE, *InnerCoeff, *OuterCoeff, &Q, &R);
+        if (R->isZero() && !isa<SCEVConstant>(Q)) {
+          BadBasePtrs.insert(BasePtr);
+        } else {
+          SCEVDivision::divide(*SE, *OuterCoeff, *InnerCoeff, &Q, &R);
+          if (R->isZero() && !isa<SCEVConstant>(Q))
+            GoodBasePtrs.insert(BasePtr);
+        }
+      }
     }
   }
 
@@ -2700,6 +2753,7 @@ PreservedAnalyses LoopInterchangePass::run(LoopNest &LN,
                                            LoopStandardAnalysisResults &AR,
                                            LPMUpdater &U) {
   Function &F = *LN.getParent();
+  countAssumeChainedCalls(F);
 
   OptimizationRemarkEmitter ORE(&F);
 

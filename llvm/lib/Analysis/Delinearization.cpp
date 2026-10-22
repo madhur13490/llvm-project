@@ -21,6 +21,8 @@
 #include "llvm/IR/Function.h"
 #include "llvm/IR/InstIterator.h"
 #include "llvm/IR/Instructions.h"
+#include "llvm/IR/IntrinsicInst.h"
+#include "llvm/IR/Operator.h"
 #include "llvm/IR/PassManager.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
@@ -661,9 +663,61 @@ bool llvm::delinearizeFixedSizeArray(ScalarEvolution &SE, const SCEV *Expr,
   return !Subscripts.empty();
 }
 
+static ArrayRef<Use> getArrayExtents(const CallBase &Assumption) {
+  return Assumption.getOperandBundle("array.extents")->Inputs;
+}
+
+const CallBase *llvm::getArrayExtentsAssumption(const Instruction *Access) {
+  const Value *Ptr = Access ? getLoadStorePointerOperand(Access) : nullptr;
+  if (!Ptr)
+    return nullptr;
+  Ptr = Ptr->stripPointerCasts();
+  while (const auto *GEP = dyn_cast<GEPOperator>(Ptr))
+    Ptr = GEP->getPointerOperand()->stripPointerCasts();
+  const auto *II = dyn_cast<IntrinsicInst>(Ptr);
+  if (!II || II->getIntrinsicID() != Intrinsic::assume_chained ||
+      !II->getOperandBundle("array.extents"))
+    return nullptr;
+  return II;
+}
+
+/// Do the extents stated by \p Assumption describe the same array that
+/// delinearization arrived at in \p Sizes?
+///
+/// The extents run from the array's fastest-varying dimension to its slowest,
+/// and \p Sizes holds what delinearization recovered from the address
+/// arithmetic: the same extents in the opposite order and without the
+/// slowest-varying one, whose extent never reaches the address, followed by the
+/// size of an element. Comparing them keeps a stale or mistaken claim from
+/// widening the analysis.
+///
+/// Runtime extents need not reach the address in the form they are stated in
+/// (a frontend may clamp them at zero, for instance), so a claim that is not
+/// entirely constant is taken at its word.
+static bool describesRecoveredShape(const CallBase &Assumption,
+                                    ArrayRef<const SCEV *> Sizes) {
+  ArrayRef<Use> Extents = getArrayExtents(Assumption);
+  if (!all_of(Extents, [](const Use &U) { return isa<ConstantInt>(U.get()); }))
+    return true;
+  unsigned Rank = Extents.size();
+  if (Rank != Sizes.size())
+    return false;
+
+  for (unsigned K = 1; K < Rank; ++K) {
+    const auto *Declared = cast<ConstantInt>(Extents[Rank - 1 - K]);
+    const auto *Recovered = dyn_cast<SCEVConstant>(Sizes[K - 1]);
+    if (!Recovered)
+      return false;
+    if (!APInt::isSameValue(Recovered->getAPInt(), Declared->getValue()))
+      return false;
+  }
+  return true;
+}
+
 bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
                                          ArrayRef<const SCEV *> Sizes,
-                                         ArrayRef<const SCEV *> Subscripts) {
+                                         ArrayRef<const SCEV *> Subscripts,
+                                         const Instruction *CtxI) {
   // Sizes and Subscripts are as follows:
   //
   //   Sizes:      [UNK][S_2]...[S_n]
@@ -684,7 +738,26 @@ bool llvm::validateDelinearizationResult(ScalarEvolution &SE,
   };
 
   // Range check: 0 <= I_k < S_k for k = 2..n.
-  for (size_t I = 1; I < Sizes.size(); ++I) {
+  //
+  // The check is needed because a language may let a subscript run past its
+  // own dimension and into the next, so staying inside each one has to be
+  // established rather than taken for granted. A language that forbids it can
+  // say so through 'llvm.assume.chained', and then there is nothing left to
+  // establish.
+  const CallBase *InRange = getArrayExtentsAssumption(CtxI);
+  bool MustCheckRange = !InRange || !describesRecoveredShape(*InRange, Sizes);
+
+  // When the frontend guarantees the subscripts stay within their dimensions of
+  // a validly allocated array, the linearization is injective by construction:
+  // the product of the extents is the array's element count, which fits the
+  // index type. Both the range check and the overflow reasoning below only
+  // re-establish that fact from the IR, so trusting the guarantee lets both be
+  // skipped. This matters for runtime (parametric) extents, where the overflow
+  // reasoning cannot be discharged even though the guarantee holds.
+  if (!MustCheckRange)
+    return true;
+
+  for (size_t I = 1; MustCheckRange && I < Sizes.size(); ++I) {
     const SCEV *Size = Sizes[I - 1];
     const SCEV *Subscript = Subscripts[I];
     if (!SE.isKnownNonNegative(Subscript))
