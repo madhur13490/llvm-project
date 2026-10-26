@@ -2,7 +2,7 @@
 // and that these attributes are propagated to LLVMIR and that these
 // interoperrate with tbaa tags added during codegen
 
-// RUN: tco %s | FileCheck %s
+// RUN: tco -enable-array-extents-assumption=false %s | FileCheck %s
 
 // subroutine func(a)
 //   integer, intent(inout) :: a(:)

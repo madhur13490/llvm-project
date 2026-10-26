@@ -1,4 +1,4 @@
-// RUN: tco %s | FileCheck %s
+// RUN: tco -enable-array-extents-assumption=false %s | FileCheck %s
 
 func.func @array_coor_box_value(%29 : !fir.box<!fir.array<2xf64>>,
      			   %33 : index) -> f64 {

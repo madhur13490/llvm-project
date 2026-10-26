@@ -49,7 +49,7 @@ cl::opt<bool> enableArrayExtentsAssumption(
     "enable-array-extents-assumption",
     cl::desc("state the extents of an array at the accesses whose subscripts "
              "must stay within them (only at -O2 and above)"),
-    cl::init(false), cl::Hidden);
+    cl::init(true), cl::Hidden);
 
 /// Force setting the no-alias attribute on fuction arguments when possible.
 llvm::cl::opt<bool> forceNoAlias("force-no-alias", llvm::cl::Hidden,

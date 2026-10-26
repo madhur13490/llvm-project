@@ -16,7 +16,7 @@
 ! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rno-pass-analysis -S %{output} 2>&1 | FileCheck %s --allow-empty --check-prefix=NO-REMARKS
 
 ! Check valid -Rpass regex
-! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rpass=loop -S %{output} 2>&1 | FileCheck %s --check-prefix=PASS-REGEX-LOOP-ONLY
+! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rpass=loop -mllvm -enable-array-extents-assumption=false -S %{output} 2>&1 | FileCheck %s --check-prefix=PASS-REGEX-LOOP-ONLY
 
 ! Check valid -Rpass-missed regex
 ! UNSUPPORTED: target=riscv{{.*}}
@@ -26,7 +26,7 @@
 ! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rpass-analysis=loop -S %{output} 2>&1 | FileCheck %s --check-prefix=ANALYSIS-REGEX-LOOP-ONLY
 
 ! Check full -Rpass message is emitted
-! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rpass -S %{output} 2>&1 | FileCheck %s --check-prefix=PASS
+! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rpass -mllvm -enable-array-extents-assumption=false -S %{output} 2>&1 | FileCheck %s --check-prefix=PASS
 
 ! Check full -Rpass-missed message is emitted
 ! RUN: %flang %s -O2 %if target=s390x{{.*}} %{-march=z13%} -Rpass-missed -S %{output} 2>&1 | FileCheck %s --check-prefix=MISSED
