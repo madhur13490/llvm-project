@@ -12001,38 +12001,23 @@ bool ScalarEvolution::isBasicBlockEntryGuardedByCond(const BasicBlock *BB,
       Pred != NonStrictPredicate.dropSameSign();
   bool ProvedNonStrictComparison = false;
   bool ProvedNonEquality = false;
-
-  auto SplitAndProve = [&](std::function<bool(CmpPredicate)> Fn) -> bool {
-    if (!ProvedNonStrictComparison)
-      ProvedNonStrictComparison = Fn(NonStrictPredicate);
-    if (!ProvedNonEquality)
-      ProvedNonEquality = Fn(ICmpInst::ICMP_NE);
-    if (ProvedNonStrictComparison && ProvedNonEquality)
-      return true;
-    return false;
-  };
-
   if (ProvingStrictComparison) {
-    auto ProofFn = [&](CmpPredicate P) {
-      return isKnownViaNonRecursiveReasoning(P, LHS, RHS);
-    };
-    if (SplitAndProve(ProofFn))
+    ProvedNonStrictComparison =
+        isKnownViaNonRecursiveReasoning(NonStrictPredicate, LHS, RHS);
+    ProvedNonEquality =
+        isKnownViaNonRecursiveReasoning(ICmpInst::ICMP_NE, LHS, RHS);
+    if (ProvedNonStrictComparison && ProvedNonEquality)
       return true;
   }
 
-  // Try to prove (Pred, LHS, RHS) using isImpliedCond.
+  // Try to prove (Pred, LHS, RHS) using isImpliedCond. Record the conditions
+  // so that the split proof below can use them once the direct proof has
+  // failed on all of them.
+  const Instruction *CtxI = &BB->front();
+  SmallVector<std::pair<const Value *, bool>, 8> Conditions;
   auto ProveViaCond = [&](const Value *Condition, bool Inverse) {
-    const Instruction *CtxI = &BB->front();
-    if (isImpliedCond(Pred, LHS, RHS, Condition, Inverse, CtxI))
-      return true;
-    if (ProvingStrictComparison) {
-      auto ProofFn = [&](CmpPredicate P) {
-        return isImpliedCond(P, LHS, RHS, Condition, Inverse, CtxI);
-      };
-      if (SplitAndProve(ProofFn))
-        return true;
-    }
-    return false;
+    Conditions.emplace_back(Condition, Inverse);
+    return isImpliedCond(Pred, LHS, RHS, Condition, Inverse, CtxI);
   };
 
   // Starting at the block's predecessor, climb up the predecessor chain, as long
@@ -12077,7 +12062,21 @@ bool ScalarEvolution::isBasicBlockEntryGuardedByCond(const BasicBlock *BB,
         if (Guard->getFunction() == BB->getParent() && DT.dominates(Guard, BB))
           if (ProveViaCond(Guard->getArgOperand(0), false))
             return true;
-  return false;
+
+  if (!ProvingStrictComparison)
+    return false;
+
+  // The non-strict comparison and the non-equality may be implied by
+  // different conditions. Non-equality is only needed once the non-strict
+  // comparison is known.
+  auto ProveViaAnyCond = [&](CmpPredicate P) {
+    return any_of(Conditions, [&](const auto &Cond) {
+      return isImpliedCond(P, LHS, RHS, Cond.first, Cond.second, CtxI);
+    });
+  };
+  if (!ProvedNonStrictComparison && !ProveViaAnyCond(NonStrictPredicate))
+    return false;
+  return ProvedNonEquality || ProveViaAnyCond(ICmpInst::ICMP_NE);
 }
 
 bool ScalarEvolution::isLoopEntryGuardedByCond(const Loop *L, CmpPredicate Pred,
