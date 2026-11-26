@@ -1591,9 +1591,11 @@ static void reportMayClobberedLoad(LoadInst *Load, Instruction *DepInst,
 // Find a dominating value for Loc memory location in the extended basic block
 // (chain of basic blocks with single predecessors) starting From instruction.
 // Returns the value from a matching load or a simple store to the same pointer.
+// Atomic targets only accept values from atomic loads.
 static Value *findDominatingValue(const ScalarOptions &Opts,
                                   const MemoryLocation &Loc, Type *LoadTy,
-                                  Instruction *From, AAResults *AA) {
+                                  Instruction *From, AAResults *AA,
+                                  bool IsAtomicTarget) {
   uint32_t NumVisitedInsts = 0;
   BasicBlock *FromBB = From->getParent();
   BatchAAResults BatchAA(*AA);
@@ -1606,13 +1608,15 @@ static Value *findDominatingValue(const ScalarOptions &Opts,
       if (isModSet(BatchAA.getModRefInfo(Inst, Loc))) {
         // A simple store to the exact location can forward its value.
         if (auto *SI = dyn_cast<StoreInst>(Inst))
-          if (SI->isSimple() && SI->getPointerOperand() == Loc.Ptr &&
+          if (!IsAtomicTarget && SI->isSimple() &&
+              SI->getPointerOperand() == Loc.Ptr &&
               SI->getValueOperand()->getType() == LoadTy)
             return SI->getValueOperand();
         return nullptr;
       }
       if (auto *LI = dyn_cast<LoadInst>(Inst))
-        if (LI->getPointerOperand() == Loc.Ptr && LI->getType() == LoadTy)
+        if (LI->getPointerOperand() == Loc.Ptr && LI->getType() == LoadTy &&
+            (!IsAtomicTarget || LI->isAtomic()))
           return LI;
     }
   return nullptr;
@@ -1630,12 +1634,14 @@ GVNPassImpl::analyzeSelectAvailability(LoadInst *Load, SelectInst *Sel,
   // loaded values only if both sides have a dominating, non-clobbered value of
   // the right type in the extended basic block ending at From.
   auto Loc = MemoryLocation::get(Load);
-  Value *V1 = findDominatingValue(*Opts, Loc.getWithNewPtr(TrueAddr),
-                                  Load->getType(), From, getAliasAnalysis());
+  Value *V1 =
+      findDominatingValue(*Opts, Loc.getWithNewPtr(TrueAddr), Load->getType(),
+                          From, getAliasAnalysis(), Load->isAtomic());
   if (!V1)
     return std::nullopt;
-  Value *V2 = findDominatingValue(*Opts, Loc.getWithNewPtr(FalseAddr),
-                                  Load->getType(), From, getAliasAnalysis());
+  Value *V2 =
+      findDominatingValue(*Opts, Loc.getWithNewPtr(FalseAddr), Load->getType(),
+                          From, getAliasAnalysis(), Load->isAtomic());
   if (!V2)
     return std::nullopt;
   return AvailableValue::getSelect(Sel, V1, V2);

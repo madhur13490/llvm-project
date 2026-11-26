@@ -358,5 +358,60 @@ exit:
   ret void
 }
 
+; A non-atomic source cannot replace the unordered atomic reload.
+define i32 @preserve_unordered_atomic(ptr %a, i32 %start, i64 %trip.count) {
+; CHECK-LABEL: define i32 @preserve_unordered_atomic(
+; CHECK-SAME: ptr [[A:%.*]], i32 [[START:%.*]], i64 [[TRIP_COUNT:%.*]]) {
+; CHECK-NEXT:  [[ENTRY:.*]]:
+; CHECK-NEXT:    [[START_EXT:%.*]] = sext i32 [[START]] to i64
+; CHECK-NEXT:    br label %[[LOOP:.*]]
+; CHECK:       [[LOOP]]:
+; CHECK-NEXT:    [[IV:%.*]] = phi i64 [ [[IV_NEXT:%.*]], %[[LOOP]] ], [ [[START_EXT]], %[[ENTRY]] ]
+; CHECK-NEXT:    [[COUNT:%.*]] = phi i64 [ [[TRIP_COUNT]], %[[ENTRY]] ], [ [[COUNT_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[MIN:%.*]] = phi i64 [ [[START_EXT]], %[[ENTRY]] ], [ [[MIN_NEXT:%.*]], %[[LOOP]] ]
+; CHECK-NEXT:    [[IV_NEXT]] = add nsw i64 [[IV]], -1
+; CHECK-NEXT:    [[SCAN_P0:%.*]] = getelementptr [4 x i8], ptr [[A]], i64 [[IV]]
+; CHECK-NEXT:    [[SCAN_P:%.*]] = getelementptr i8, ptr [[SCAN_P0]], i64 -8
+; CHECK-NEXT:    [[SCAN_VALUE:%.*]] = load i32, ptr [[SCAN_P]], align 4
+; CHECK-NEXT:    [[SCAN_FROZEN:%.*]] = freeze i32 [[SCAN_VALUE]]
+; CHECK-NEXT:    [[MIN_P0:%.*]] = getelementptr [4 x i8], ptr [[A]], i64 [[MIN]]
+; CHECK-NEXT:    [[MIN_P:%.*]] = getelementptr i8, ptr [[MIN_P0]], i64 -4
+; CHECK-NEXT:    [[MIN_VALUE:%.*]] = load atomic i32, ptr [[MIN_P]] unordered, align 4
+; CHECK-NEXT:    [[IS_LESS:%.*]] = icmp slt i32 [[SCAN_FROZEN]], [[MIN_VALUE]]
+; CHECK-NEXT:    [[MIN_NEXT]] = select i1 [[IS_LESS]], i64 [[IV_NEXT]], i64 [[MIN]]
+; CHECK-NEXT:    [[RESULT:%.*]] = trunc nsw i64 [[MIN_NEXT]] to i32
+; CHECK-NEXT:    [[COUNT_NEXT]] = add nsw i64 [[COUNT]], -1
+; CHECK-NEXT:    [[AGAIN:%.*]] = icmp sgt i64 [[COUNT]], 1
+; CHECK-NEXT:    br i1 [[AGAIN]], label %[[LOOP]], label %[[EXIT:.*]]
+; CHECK:       [[EXIT]]:
+; CHECK-NEXT:    ret i32 [[RESULT]]
+;
+entry:
+  %start.ext = sext i32 %start to i64
+  br label %loop
+
+loop:
+  %iv = phi i64 [ %iv.next, %loop ], [ %start.ext, %entry ]
+  %count = phi i64 [ %trip.count, %entry ], [ %count.next, %loop ]
+  %min = phi i64 [ %start.ext, %entry ], [ %min.next, %loop ]
+  %iv.next = add nsw i64 %iv, -1
+  %scan.p0 = getelementptr [4 x i8], ptr %a, i64 %iv
+  %scan.p = getelementptr i8, ptr %scan.p0, i64 -8
+  %scan.value = load i32, ptr %scan.p, align 4
+  %scan.frozen = freeze i32 %scan.value
+  %min.p0 = getelementptr [4 x i8], ptr %a, i64 %min
+  %min.p = getelementptr i8, ptr %min.p0, i64 -4
+  %min.value = load atomic i32, ptr %min.p unordered, align 4
+  %is.less = icmp slt i32 %scan.frozen, %min.value
+  %min.next = select i1 %is.less, i64 %iv.next, i64 %min
+  %result = trunc nsw i64 %min.next to i32
+  %count.next = add nsw i64 %count, -1
+  %again = icmp sgt i64 %count, 1
+  br i1 %again, label %loop, label %exit
+
+exit:
+  ret i32 %result
+}
+
 declare void @use(<2 x ptr>) memory(none)
 declare void @use.i8(i8)
